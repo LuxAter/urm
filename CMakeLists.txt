@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.14.0 FATAL_ERROR)
 project(urm VERSION 1.0.0 LANGUAGES CXX)
 
 option(STATIC_ANALYSIS "Use static analysis tools" FALSE)
-option(OPTIMIZE_DEBUG "Enable compile time optimization for debug build" TRUE)
+option(OPTIMIZE_DEBUG "Enable compile time optimization for debug build" FALSE)
 option(PROFILER "Enable deuging profiler" FALSE)
 option(HPC "Preforms rendering using multiple threads" TRUE)
 set(URM_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})

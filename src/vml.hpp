@@ -1,1457 +1,886 @@
 #ifndef VML_HPP_
 #define VML_HPP_
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <string>
 #include <type_traits>
 #include <utility>
 
-#ifdef VML_FMT
-#include <string>
-#ifdef VML_OSTREAM
-#include <iostream>
-#endif // VML_OSTREAM
-#endif // VML_FMT
-
-#define FUNC(x) vml_##x
-#define LIB static __attribute__((always_inline))
-#define DEF_OP_BINARY(op, impl_op, a_type, b_type)                             \
-  friend vector_type operator op(a_type a, b_type b) {                         \
-    auto out = vector_type(a);                                                 \
-    out impl_op b;                                                             \
-    return out;                                                                \
-  }
-#define DEF_OP_UNARY_SCALAR(op, N)                                             \
-  self_type &operator op(scalar_type s) {                                      \
-    ((data[N] op s), ...);                                                     \
-    return *this;                                                              \
-  }
-#define DEF_OP_UNARY_VECTOR(op, N)                                             \
-  self_type &operator op(const self_type &v) {                                 \
-    ((data[N] op v.data[N]), ...);                                             \
-    return *this;                                                              \
-  }
-#define MAKE_VML_FUNC(name)                                                    \
-  template <class... Args>                                                     \
-  inline auto name(Args &&... args)                                            \
-      ->decltype(::vml::detail::decay(                                         \
-          ::vml::traits::promote_to_vec<Args...>::type::FUNC(name)(            \
-              std::forward<Args>(args)...))) {                                 \
-    return ::vml::traits::promote_to_vec<Args...>::type::FUNC(name)(           \
-        std::forward<Args>(args)...);                                          \
+#define VML_FUNC(NAME)                                                         \
+  template <typename... Args>                                                  \
+  inline auto NAME(Args &&... args)                                            \
+      ->decltype(::vml::detail::NAME(                                          \
+          ::vml::detail::decay(std::forward<Args>(args))...)) {                \
+    return ::vml::detail::NAME(                                                \
+        ::vml::detail::decay(std::forward<Args>(args))...);                    \
   }
 
 namespace vml {
-
-template <typename T, size_t... Ns> struct vector;
-
+template <typename T, size_t N> struct vector;
 namespace detail {
-struct nothing {};
-template <size_t Begin, size_t End> struct static_for {
-  template <class Func> constexpr void operator()(Func &&f) {
+  struct nothing {};
+
+  template <size_t Begin, size_t End, class Func>
+  inline constexpr typename std::enable_if<Begin == End, void>::type
+  static_for(Func &&) {}
+  template <size_t Begin, size_t End, class Func>
+  inline constexpr typename std::enable_if<Begin != End, void>::type
+  static_for(Func &&f) {
     f(Begin);
-    static_for<Begin + 1, End>()(std::forward<Func>(f));
-  }
-};
-
-template <size_t N> struct static_for<N, N> {
-  template <class Func> constexpr void operator()(Func &&) {}
-};
-
-template <class T> constexpr auto decay(T &&t) -> decltype(t.decay()) {
-  return t.decay();
-}
-template <class T>
-constexpr typename std::enable_if<
-    std::is_arithmetic<typename std::remove_reference<T>::type>::value, T>::type
-decay(T &&t) {
-  return t;
-}
-template <class T> struct remove_cvref {
-  using type = std::remove_cv_t<std::remove_reference_t<T>>;
-};
-template <class T> constexpr size_t get_size() {
-  if constexpr (std::is_arithmetic<typename remove_cvref<T>::type>::value) {
-    return 1;
-  } else {
-    return remove_cvref<T>::type::num_components;
-  }
-}
-
-template <typename vector_type, typename T, size_t N, size_t... indicies>
-struct swizzler {
-  static constexpr auto num_components = sizeof...(indicies);
-  T data[N];
-  vector_type decay() const {
-    vector_type vec;
-    assign_across(vec, 0, indicies...);
-    return vec;
-  }
-  operator vector_type() const { return decay(); }
-  operator vector_type() { return decay(); }
-  swizzler &operator=(const vector_type &vec) {
-    assign_across(vec, 0, indicies...);
-    return *this;
+    static_for<Begin + 1, End>(std::forward<Func>(f));
   }
 
-#ifdef VML_OPENACC
-  void todev() {
-#pragma acc enter data copyin(this [0:1], data [0:N])
+  template <typename T, size_t N, class Func>
+  inline constexpr vector<T, N> static_constructor(Func &&f) {
+    vector<T, N> tmp;
+    return static_constructor<0, T, N>(tmp, f);
   }
-  void fromdev() {
-#pragma acc exit data delete (data [0:N], this [0:1])
+  template <size_t I, typename T, size_t N, class Func>
+  inline constexpr typename std::enable_if<I != N, vector<T, N>>::type
+  static_constructor(vector<T, N> &v, Func &&f) {
+    v[I] = f(I);
+    return static_constructor<I + 1, T, N>(v, std::forward<Func>(f));
   }
-  void updatehost() {
-#pragma acc update self(data [0:N])
-  }
-  void updatedev() {
-#pragma acc update device(data [0:N])
-  }
-#endif
-
-private:
-  template <typename... Indicies>
-  void assign_across(vector_type &vec, size_t i, Indicies... swizz_i) const {
-    ((vec[i++] = data[swizz_i]), ...);
-  }
-  template <typename... Indicies>
-  void assign_across(const vector_type &vec, size_t i, Indicies... swizz_i) {
-    ((data[swizz_i] = vec[i++]), ...);
-  }
-};
-
-template <template <typename, size_t...> class vector, typename scalar_type,
-          size_t... Ns>
-struct builtin_func_lib {
-  using vector_type = vector<scalar_type, Ns...>;
-  using vector_arg_type = const vector_type &;
-  using bool_vector_type = vector<bool, Ns...>;
-  static constexpr auto one = scalar_type(1);
-  static constexpr auto zero = scalar_type(0);
-
-  LIB vector_type FUNC(radians)(vector_arg_type degrees) {
-    constexpr auto pi_over_180 = scalar_type(3.14159265358979323846 / 180);
-    return vector_type((degrees.data[Ns] * pi_over_180)...);
-  }
-  LIB vector_type FUNC(degrees)(vector_arg_type radians) {
-    constexpr auto _180_over_pi = scalar_type(180 / 3.14159265358979323846);
-    return vector_type((radians.data[Ns] * _180_over_pi)...);
-  }
-  LIB vector_type FUNC(sin)(vector_arg_type t) {
-    return vector_type(std::sin(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(cos)(vector_arg_type t) {
-    return vector_type(std::cos(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(tan)(vector_arg_type t) {
-    return vector_type(std::tan(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(asin)(vector_arg_type t) {
-    return vector_type(std::asin(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(acos)(vector_arg_type t) {
-    return vector_type(std::acos(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(atan)(vector_arg_type t) {
-    return vector_type(std::atan(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(atan)(vector_arg_type y, vector_arg_type x) {
-    return vector_type(std::atan2(y.data[Ns], x.data[Ns])...);
+  template <size_t I, typename T, size_t N, class Func>
+  inline constexpr typename std::enable_if<I == N, vector<T, N>>::type
+  static_constructor(vector<T, N> &v, Func &&) {
+    return v;
   }
 
-  LIB vector_type FUNC(pow)(vector_arg_type x, vector_arg_type y) {
-    return vector_type(std::pow(x.data[Ns], y.data[Ns])...);
+  template <typename T>
+  inline constexpr auto decay(T &&t) -> decltype(t.decay()) {
+    return t.decay();
   }
-  LIB vector_type FUNC(exp)(vector_arg_type t) {
-    return vector_type(std::exp(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(log)(vector_arg_type t) {
-    return vector_type(std::log(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(exp2)(vector_arg_type t) {
-    return vector_type(std::exp2(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(log2)(vector_arg_type t) {
-    return vector_type(std::log2(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(sqrt)(vector_arg_type t) {
-    return vector_type(std::sqrt(t.data[Ns])...);
-  }
-  LIB scalar_type rsqrt(scalar_type t) { return one / std::sqrt(t); }
-  LIB vector_type FUNC(inversesqrt)(vector_arg_type t) {
-    return vector_type(rsqrt(t.data[Ns])...);
+  template <typename T>
+  inline constexpr typename std::enable_if<
+      std::is_arithmetic<typename std::remove_reference<T>::type>::value,
+      T>::type
+  decay(T &&t) {
+    return t;
   }
 
-  LIB vector_type FUNC(abs)(vector_arg_type t) {
-    return vector_type(std::abs(t.data[Ns])...);
-  }
-  LIB scalar_type sign(scalar_type t) { return (zero < t) - (t < zero); }
-  LIB vector_type FUNC(sign)(vector_arg_type t) {
-    return vector_type(sign(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(floor)(vector_arg_type t) {
-    return vector_type(std::floor(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(trunc)(vector_arg_type t) {
-    return vector_type(std::trunc(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(ceil)(vector_arg_type t) {
-    return vector_type(std::ceil(t.data[Ns])...);
-  }
-  LIB vector_type FUNC(fract)(vector_arg_type t) {
-    return vector_type((t.data[Ns] - std::floor(t.data[Ns]))...);
-  }
-  LIB vector_type FUNC(mod)(vector_arg_type x, scalar_type y) {
-    return vector_type((x.data[Ns] - y * std::floor(x.data[Ns] / y))...);
-  }
-  LIB vector_type FUNC(mod)(vector_arg_type x, vector_arg_type y) {
-    return vector_type(
-        (x.data[Ns] - y.data[Ns] * std::floor(x.data[Ns] / y.data[Ns]))...);
-  }
-  LIB vector_type FUNC(min)(vector_arg_type x, scalar_type y) {
-    return vector_type((x.data[Ns] < y ? x.data[Ns] : y)...);
-  }
-  LIB vector_type FUNC(min)(vector_arg_type x, vector_arg_type y) {
-    return vector_type((x.data[Ns] < y.data[Ns] ? x.data[Ns] : y.data[Ns])...);
-  }
-  LIB vector_type FUNC(max)(vector_arg_type x, scalar_type y) {
-    return vector_type((x.data[Ns] > y ? x.data[Ns] : y)...);
-  }
-  LIB vector_type FUNC(max)(vector_arg_type x, vector_arg_type y) {
-    return vector_type((x.data[Ns] > y.data[Ns] ? x.data[Ns] : y.data[Ns])...);
-  }
-  LIB vector_type FUNC(clamp)(vector_arg_type x, scalar_type min_val,
-                              scalar_type max_val) {
-    return FUNC(min)(FUNC(max)(x, min_val), max_val);
-  }
-  LIB vector_type FUNC(clamp)(vector_arg_type x, vector_arg_type min_val,
-                              vector_arg_type max_val) {
-    return FUNC(min)(FUNC(max)(x, min_val), max_val);
-  }
-  LIB vector_type FUNC(mix)(vector_arg_type x, vector_arg_type y,
-                            scalar_type a) {
-    return x * (scalar_type(1) - a) + y * a;
-  }
-  LIB vector_type FUNC(mix)(vector_arg_type x, vector_arg_type y,
-                            vector_arg_type a) {
-    return x * (scalar_type(1) - a) + y * a;
-  }
-  LIB vector_type FUNC(mix)(vector_arg_type x, vector_arg_type y,
-                            bool_vector_type a) {
-    return vector_type((a.data[Ns] ? y.data[Ns] : x.data[Ns])...);
-  }
-  LIB vector_type FUNC(step)(scalar_type edge, vector_arg_type x) {
-    return vector_type(
-        (x.data[Ns] < edge ? scalar_type(0) : scalar_type(1))...);
-  }
-  LIB vector_type FUNC(step)(vector_arg_type edge, vector_arg_type x) {
-    return vector_type(
-        (x.data[Ns] < edge.data[Ns] ? scalar_type(0) : scalar_type(1))...);
-  }
-  LIB vector_type FUNC(smoothstep)(scalar_type edge0, scalar_type edge1,
-                                   vector_arg_type x) {
-    auto t = FUNC(clamp)((x - edge0) / (edge1 - edge0), zero, one);
-    return t * t * (scalar_type(3) - scalar_type(2) * t);
-  }
-  LIB vector_type FUNC(smoothstep)(vector_arg_type edge0, vector_arg_type edge1,
-                                   vector_arg_type x) {
-    auto t = FUNC(clamp)((x - edge0) / (edge1 - edge0), zero, one);
-    return t * t * (scalar_type(3) - scalar_type(2) * t);
-  }
+  template <typename T, size_t N, size_t M, unsigned int MASK> struct swizzle {
+    typedef T scalar_type;
+    typedef vector<T, M> vector_type;
+    scalar_type data[N];
 
-  LIB scalar_type FUNC(length)(vector_arg_type v) {
-    return std::sqrt(FUNC(dot)(v, v));
-  }
-  LIB scalar_type FUNC(distance)(vector_arg_type p0, vector_arg_type p1) {
-    return FUNC(length)(p0 - p1);
-  }
-  LIB vector_type FUNC(normalize)(vector_arg_type v) {
-    vector_type out = v;
-    out /= FUNC(length)(v);
-    return out;
-  }
-  LIB scalar_type FUNC(dot)(vector_arg_type a, vector_arg_type b) {
-    scalar_type sum = 0;
-    ((sum += a.data[Ns] * b.data[Ns]), ...);
-    return sum;
-  }
-  LIB vector_type FUNC(cross)(vector_arg_type a, vector_arg_type b) {
-    static_assert(vector_type::num_components == 3,
-                  "cross product only defined for vec3");
-    return vector_type(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z,
-                       a.x * b.y - a.y * b.x);
-  }
-  LIB vector_type FUNC(faceforward)(vector_arg_type N, vector_arg_type I,
-                                    vector_arg_type Nref) {
-    return (FUNC(dot)(Nref, I) < scalar_type(0) ? N : (-N));
-  }
-  LIB vector_type FUNC(reflect)(vector_arg_type I, vector_arg_type N) {
-    return (I - scalar_type(2) * FUNC(dot)(I, N) * N);
-  }
-  LIB vector_type FUNC(refract)(vector_arg_type I, vector_arg_type N,
-                                scalar_type eta) {
-    auto k = one - eta * eta * (one - FUNC(dot)(N, I) * FUNC(dot)(N, I));
-    if (k < zero) {
-      return vector_type();
-    } else {
-      return eta * I - (eta * FUNC(dot)(N, I) + sqrt(k)) * N;
+    scalar_type &operator[](size_t i) {
+      return data[(MASK >> (8 * (M - i - 1))) & 0xFF];
     }
-  }
+    const scalar_type &operator[](size_t i) const {
+      return data[(MASK >> (8 * (M - i - 1))) & 0xFF];
+    }
 
-  LIB bool_vector_type FUNC(less_than)(vector_arg_type x, vector_arg_type y) {
-    return bool_vector_type((x.data[Ns] < y.data[Ns])...);
-  }
-  LIB bool_vector_type FUNC(less_than_equal)(vector_arg_type x,
-                                             vector_arg_type y) {
-    return bool_vector_type((x.data[Ns] <= y.data[Ns])...);
-  }
-  LIB bool_vector_type FUNC(greater_than)(vector_arg_type x,
-                                          vector_arg_type y) {
-    return bool_vector_type((x.data[Ns] > y.data[Ns])...);
-  }
-  LIB bool_vector_type FUNC(greater_than_equal)(vector_arg_type x,
-                                                vector_arg_type y) {
-    return bool_vector_type((x.data[Ns] >= y.data[Ns])...);
-  }
-  LIB bool_vector_type FUNC(equal)(vector_arg_type x, vector_arg_type y) {
-    return bool_vector_type((x.data[Ns] == y.data[Ns])...);
-  }
-  LIB bool_vector_type FUNC(not_equal)(vector_arg_type x, vector_arg_type y) {
-    return bool_vector_type((x.data[Ns] != y.data[Ns])...);
-  }
-  LIB bool
-  FUNC(any)(typename std::conditional<std::is_same<scalar_type, bool>::value,
-                                      vector_arg_type, nothing>::type b) {
-    return (... || b.data[Ns]);
-  }
-  LIB bool
-  FUNC(all)(typename std::conditional<std::is_same<scalar_type, bool>::value,
-                                      vector_arg_type, nothing>::type b) {
-    return (... && b.data[Ns]);
-  }
-  LIB bool_vector_type
-  FUNC(_not)(typename std::conditional<std::is_same<scalar_type, bool>::value,
-                                       vector_arg_type, nothing>::type b) {
-    return bool_vector_type((!b.data[Ns])...);
-  }
-};
-
-template <typename vector_type, typename scalar_type> struct binary_vec_ops {
-  DEF_OP_BINARY(+, +=, const vector_type &, const vector_type &);
-  DEF_OP_BINARY(-, -=, const vector_type &, const vector_type &);
-  DEF_OP_BINARY(*, *=, const vector_type &, const vector_type &);
-  DEF_OP_BINARY(/, /=, const vector_type &, const vector_type &);
-  DEF_OP_BINARY(+, +=, const vector_type &, scalar_type);
-  DEF_OP_BINARY(-, -=, const vector_type &, scalar_type);
-  DEF_OP_BINARY(*, *=, const vector_type &, scalar_type);
-  DEF_OP_BINARY(/, /=, const vector_type &, scalar_type);
-  DEF_OP_BINARY(+, +=, scalar_type, const vector_type &);
-  DEF_OP_BINARY(-, -=, scalar_type, const vector_type &);
-  DEF_OP_BINARY(*, *=, scalar_type, const vector_type &);
-  DEF_OP_BINARY(/, /=, scalar_type, const vector_type &);
-};
-
-template <typename T, size_t N, template <size_t...> class swizzler_wrapper>
-struct vector_base;
-template <typename, size_t> struct vec_equiv;
-template <typename T> struct vec_equiv<T, 1> { using type = vector<T, 0>; };
-template <typename T> struct vec_equiv<T, 2> { using type = vector<T, 0, 1>; };
-template <typename T> struct vec_equiv<T, 3> {
-  using type = vector<T, 0, 1, 2>;
-};
-template <typename T> struct vec_equiv<T, 4> {
-  using type = vector<T, 0, 1, 2, 3>;
-};
-
-template <typename T, size_t... Ns> struct vector_base_selector {
-  static_assert(sizeof...(Ns), "must have at lease 1 component");
-  template <size_t... indicies> struct swizzler_wrapper_factory {
-    using type =
-        detail::swizzler<typename vec_equiv<T, sizeof...(indicies)>::type, T,
-                         sizeof...(Ns), indicies...>;
+    vector_type decay() const {
+      return ::vml::detail::static_constructor<T, M>(
+          [&](size_t i) { return (*this)[i]; });
+    }
+    operator vector_type() const { return decay(); }
+    operator vector_type() { return decay(); }
+    operator typename std::conditional<M == 1, scalar_type,
+                                       ::vml::detail::nothing>::type() const {
+      return data[0];
+    }
+    swizzle &operator=(const vector_type &vec) {
+      scalar_type tmp[M];
+      for (size_t i = 0; i < M; ++i)
+        tmp[i] = vec[i];
+      for (size_t i = 0; i < M; ++i)
+        *this[i] = tmp[i];
+      return *this;
+    }
   };
-  template <size_t x> struct swizzler_wrapper_factory<x> { using type = T; };
-  using base_type = vector_base<T, sizeof...(Ns), swizzler_wrapper_factory>;
-};
 
-template <typename T, template <size_t...> class swizzler_wrapper>
-struct vector_base<T, 1, swizzler_wrapper> {
+  template <typename T, size_t N> struct vector_base;
 
-#ifdef VML_OPENACC
-  void todev() {
-#pragma acc enter data copyin(this [0:1], data [0:1])
-  }
-  void fromdev() {
-#pragma acc exit data delete (data [0:1], this [0:1])
-  }
-  void updatehost() {
-#pragma acc update self(data [0:1])
-  }
-  void updatedev() {
-#pragma acc update device(data [0:1])
-  }
-#endif
-
-  union {
-    T data[1];
-    struct {
-      typename swizzler_wrapper<0>::type x;
+  template <typename T> struct vector_base<T, 1> {
+    typedef T scalar_type;
+    union {
+      scalar_type data[1];
+      swizzle<T, 1, 1, 0x00> x, r;
+      swizzle<T, 1, 2, 0x0000> xx, rr;
+      swizzle<T, 1, 3, 0x000000> xxx, rrr;
+      swizzle<T, 1, 4, 0x00000000> xxxx, rrrr;
     };
-    struct {
-      typename swizzler_wrapper<0>::type r;
-    };
-    struct {
-      typename swizzler_wrapper<0>::type s;
-    };
-    typename swizzler_wrapper<0, 0>::type xx, rr, ss;
-    typename swizzler_wrapper<0, 0, 0>::type xxx, rrr, sss;
-    typename swizzler_wrapper<0, 0, 0, 0>::type xxxx, rrrr, ssss;
   };
-};
 
-template <typename T, template <size_t...> class swizzler_wrapper>
-struct vector_base<T, 2, swizzler_wrapper> {
+  template <typename T> struct vector_base<T, 2> {
+    typedef T scalar_type;
+    union {
+      scalar_type data[2];
+      swizzle<T, 2, 1, 0x00> x, r;
+      swizzle<T, 2, 1, 0x01> y, g;
 
-#ifdef VML_OPENACC
-  void todev() {
-#pragma acc enter data copyin(this [0:1], data [0:2])
-  }
-  void fromdev() {
-#pragma acc exit data delete (data [0:2], this [0:1])
-  }
-  void updatehost() {
-#pragma acc update self(data [0:2])
-  }
-  void updatedev() {
-#pragma acc update device(data [0:2])
-  }
-#endif
+      swizzle<T, 2, 2, 0x0000> xx, rr;
+      swizzle<T, 2, 2, 0x0001> xy, rg;
+      swizzle<T, 2, 2, 0x0100> yx, gr;
+      swizzle<T, 2, 2, 0x0101> yy, gg;
 
-  union {
-    T data[2];
-    struct {
-      typename swizzler_wrapper<0>::type x;
-      typename swizzler_wrapper<1>::type y;
+      swizzle<T, 2, 3, 0x000000> xxx, rrr;
+      swizzle<T, 2, 3, 0x000001> xxy, rrg;
+      swizzle<T, 2, 3, 0x000100> xyx, rgr;
+      swizzle<T, 2, 3, 0x000101> xyy, rgg;
+      swizzle<T, 2, 3, 0x010000> yxx, grr;
+      swizzle<T, 2, 3, 0x010001> yxy, grg;
+      swizzle<T, 2, 3, 0x010100> yyx, ggr;
+      swizzle<T, 2, 3, 0x010101> yyy, ggg;
+
+      swizzle<T, 2, 4, 0x00000000> xxxx, rrrr;
+      swizzle<T, 2, 4, 0x00000001> xxxy, rrrg;
+      swizzle<T, 2, 4, 0x00000100> xxyx, rrgr;
+      swizzle<T, 2, 4, 0x00000101> xxyy, rrgg;
+      swizzle<T, 2, 4, 0x00010000> xyxx, rgrr;
+      swizzle<T, 2, 4, 0x00010001> xyxy, rgrg;
+      swizzle<T, 2, 4, 0x00010100> xyyx, rggr;
+      swizzle<T, 2, 4, 0x00010101> xyyy, rggg;
+      swizzle<T, 2, 4, 0x01000000> yxxx, grrr;
+      swizzle<T, 2, 4, 0x01000001> yxxy, grrg;
+      swizzle<T, 2, 4, 0x01000100> yxyx, grgr;
+      swizzle<T, 2, 4, 0x01000101> yxyy, grgg;
+      swizzle<T, 2, 4, 0x01010000> yyxx, ggrr;
+      swizzle<T, 2, 4, 0x01010001> yyxy, ggrg;
+      swizzle<T, 2, 4, 0x01010100> yyyx, gggr;
+      swizzle<T, 2, 4, 0x01010101> yyyy, gggg;
     };
-    struct {
-      typename swizzler_wrapper<0>::type r;
-      typename swizzler_wrapper<1>::type g;
-    };
-    struct {
-      typename swizzler_wrapper<0>::type s;
-      typename swizzler_wrapper<1>::type t;
-    };
-    typename swizzler_wrapper<0, 0>::type xx, rr, ss;
-    typename swizzler_wrapper<0, 1>::type xy, rg, st;
-    typename swizzler_wrapper<1, 0>::type yx, gr, ts;
-    typename swizzler_wrapper<1, 1>::type yy, gg, tt;
-    typename swizzler_wrapper<0, 0, 0>::type xxx, rrr, sss;
-    typename swizzler_wrapper<0, 0, 1>::type xxy, rrg, sst;
-    typename swizzler_wrapper<0, 1, 0>::type xyx, rgr, sts;
-    typename swizzler_wrapper<0, 1, 1>::type xyy, rgg, stt;
-    typename swizzler_wrapper<1, 0, 0>::type yxx, grr, tss;
-    typename swizzler_wrapper<1, 0, 1>::type yxy, grg, tst;
-    typename swizzler_wrapper<1, 1, 0>::type yyx, ggr, tts;
-    typename swizzler_wrapper<1, 1, 1>::type yyy, ggg, ttt;
-    typename swizzler_wrapper<0, 0, 0, 0>::type xxxx, rrrr, ssss;
-    typename swizzler_wrapper<0, 0, 0, 1>::type xxxy, rrrg, ssst;
-    typename swizzler_wrapper<0, 0, 1, 0>::type xxyx, rrgr, ssts;
-    typename swizzler_wrapper<0, 0, 1, 1>::type xxyy, rrgg, sstt;
-    typename swizzler_wrapper<0, 1, 0, 0>::type xyxx, rgrr, stss;
-    typename swizzler_wrapper<0, 1, 0, 1>::type xyxy, rgrg, stst;
-    typename swizzler_wrapper<0, 1, 1, 0>::type xyyx, rggr, stts;
-    typename swizzler_wrapper<0, 1, 1, 1>::type xyyy, rggg, sttt;
-    typename swizzler_wrapper<1, 0, 0, 0>::type yxxx, grrr, tsss;
-    typename swizzler_wrapper<1, 0, 0, 1>::type yxxy, grrg, tsst;
-    typename swizzler_wrapper<1, 0, 1, 0>::type yxyx, grgr, tsts;
-    typename swizzler_wrapper<1, 0, 1, 1>::type yxyy, grgg, tstt;
-    typename swizzler_wrapper<1, 1, 0, 0>::type yyxx, ggrr, ttss;
-    typename swizzler_wrapper<1, 1, 0, 1>::type yyxy, ggrg, ttst;
-    typename swizzler_wrapper<1, 1, 1, 0>::type yyyx, gggr, ttts;
-    typename swizzler_wrapper<1, 1, 1, 1>::type yyyy, gggg, tttt;
   };
-};
 
-template <typename T, template <size_t...> class swizzler_wrapper>
-struct vector_base<T, 3, swizzler_wrapper> {
+  template <typename T> struct vector_base<T, 3> {
+    typedef T scalar_type;
+    union {
+      scalar_type data[3];
+      swizzle<T, 3, 1, 0x00> x, r;
+      swizzle<T, 3, 1, 0x01> y, g;
+      swizzle<T, 3, 1, 0x02> z, b;
 
-#ifdef VML_OPENACC
-  void todev() {
-#pragma acc enter data copyin(this [0:1], data [0:3])
-  }
-  void fromdev() {
-#pragma acc exit data delete (data [0:3], this [0:1])
-  }
-  void updatehost() {
-#pragma acc update self(data [0:3])
-  }
-  void updatedev() {
-#pragma acc update device(data [0:3])
-  }
-#endif
+      swizzle<T, 3, 2, 0x0000> xx, rr;
+      swizzle<T, 3, 2, 0x0001> xy, rg;
+      swizzle<T, 3, 2, 0x0002> xz, rb;
+      swizzle<T, 3, 2, 0x0100> yx, gr;
+      swizzle<T, 3, 2, 0x0101> yy, gg;
+      swizzle<T, 3, 2, 0x0102> yz, gb;
+      swizzle<T, 3, 2, 0x0200> zx, br;
+      swizzle<T, 3, 2, 0x0201> zy, bg;
+      swizzle<T, 3, 2, 0x0202> zz, bb;
 
-  union {
-    T data[3];
-    struct {
-      typename swizzler_wrapper<0>::type x;
-      typename swizzler_wrapper<1>::type y;
-      typename swizzler_wrapper<2>::type z;
+      swizzle<T, 3, 3, 0x000000> xxx, rrr;
+      swizzle<T, 3, 3, 0x000001> xxy, rrg;
+      swizzle<T, 3, 3, 0x000002> xxz, rrb;
+      swizzle<T, 3, 3, 0x000100> xyx, rgr;
+      swizzle<T, 3, 3, 0x000101> xyy, rgg;
+      swizzle<T, 3, 3, 0x000102> xyz, rgb;
+      swizzle<T, 3, 3, 0x000200> xzx, rbr;
+      swizzle<T, 3, 3, 0x000201> xzy, rbg;
+      swizzle<T, 3, 3, 0x000202> xzz, rbb;
+      swizzle<T, 3, 3, 0x010000> yxx, grr;
+      swizzle<T, 3, 3, 0x010001> yxy, grg;
+      swizzle<T, 3, 3, 0x010002> yxz, grb;
+      swizzle<T, 3, 3, 0x010100> yyx, ggr;
+      swizzle<T, 3, 3, 0x010101> yyy, ggg;
+      swizzle<T, 3, 3, 0x010102> yyz, ggb;
+      swizzle<T, 3, 3, 0x010200> yzx, gbr;
+      swizzle<T, 3, 3, 0x010201> yzy, gbg;
+      swizzle<T, 3, 3, 0x010202> yzz, gbb;
+      swizzle<T, 3, 3, 0x020000> zxx, brr;
+      swizzle<T, 3, 3, 0x020001> zxy, brg;
+      swizzle<T, 3, 3, 0x020002> zxz, brb;
+      swizzle<T, 3, 3, 0x020100> zyx, bgr;
+      swizzle<T, 3, 3, 0x020101> zyy, bgg;
+      swizzle<T, 3, 3, 0x020102> zyz, bgb;
+      swizzle<T, 3, 3, 0x020200> zzx, bbr;
+      swizzle<T, 3, 3, 0x020201> zzy, bbg;
+      swizzle<T, 3, 3, 0x020202> zzz, bbb;
+
+      swizzle<T, 3, 4, 0x00000000> xxxx, rrrr;
+      swizzle<T, 3, 4, 0x00000001> xxxy, rrrg;
+      swizzle<T, 3, 4, 0x00000002> xxxz, rrrb;
+      swizzle<T, 3, 4, 0x00000100> xxyx, rrgr;
+      swizzle<T, 3, 4, 0x00000101> xxyy, rrgg;
+      swizzle<T, 3, 4, 0x00000102> xxyz, rrgb;
+      swizzle<T, 3, 4, 0x00000200> xxzx, rrbr;
+      swizzle<T, 3, 4, 0x00000201> xxzy, rrbg;
+      swizzle<T, 3, 4, 0x00000202> xxzz, rrbb;
+      swizzle<T, 3, 4, 0x00010000> xyxx, rgrr;
+      swizzle<T, 3, 4, 0x00010001> xyxy, rgrg;
+      swizzle<T, 3, 4, 0x00010002> xyxz, rgrb;
+      swizzle<T, 3, 4, 0x00010100> xyyx, rggr;
+      swizzle<T, 3, 4, 0x00010101> xyyy, rggg;
+      swizzle<T, 3, 4, 0x00010102> xyyz, rggb;
+      swizzle<T, 3, 4, 0x00010200> xyzx, rgbr;
+      swizzle<T, 3, 4, 0x00010201> xyzy, rgbg;
+      swizzle<T, 3, 4, 0x00010202> xyzz, rgbb;
+      swizzle<T, 3, 4, 0x00020000> xzxx, rbrr;
+      swizzle<T, 3, 4, 0x00020001> xzxy, rbrg;
+      swizzle<T, 3, 4, 0x00020002> xzxz, rbrb;
+      swizzle<T, 3, 4, 0x00020100> xzyx, rbgr;
+      swizzle<T, 3, 4, 0x00020101> xzyy, rbgg;
+      swizzle<T, 3, 4, 0x00020102> xzyz, rbgb;
+      swizzle<T, 3, 4, 0x00020200> xzzx, rbbr;
+      swizzle<T, 3, 4, 0x00020201> xzzy, rbbg;
+      swizzle<T, 3, 4, 0x00020202> xzzz, rbbb;
+      swizzle<T, 3, 4, 0x01000000> yxxx, grrr;
+      swizzle<T, 3, 4, 0x01000001> yxxy, grrg;
+      swizzle<T, 3, 4, 0x01000002> yxxz, grrb;
+      swizzle<T, 3, 4, 0x01000100> yxyx, grgr;
+      swizzle<T, 3, 4, 0x01000101> yxyy, grgg;
+      swizzle<T, 3, 4, 0x01000102> yxyz, grgb;
+      swizzle<T, 3, 4, 0x01000200> yxzx, grbr;
+      swizzle<T, 3, 4, 0x01000201> yxzy, grbg;
+      swizzle<T, 3, 4, 0x01000202> yxzz, grbb;
+      swizzle<T, 3, 4, 0x01010000> yyxx, ggrr;
+      swizzle<T, 3, 4, 0x01010001> yyxy, ggrg;
+      swizzle<T, 3, 4, 0x01010002> yyxz, ggrb;
+      swizzle<T, 3, 4, 0x01010100> yyyx, gggr;
+      swizzle<T, 3, 4, 0x01010101> yyyy, gggg;
+      swizzle<T, 3, 4, 0x01010102> yyyz, gggb;
+      swizzle<T, 3, 4, 0x01010200> yyzx, ggbr;
+      swizzle<T, 3, 4, 0x01010201> yyzy, ggbg;
+      swizzle<T, 3, 4, 0x01010202> yyzz, ggbb;
+      swizzle<T, 3, 4, 0x01020000> yzxx, gbrr;
+      swizzle<T, 3, 4, 0x01020001> yzxy, gbrg;
+      swizzle<T, 3, 4, 0x01020002> yzxz, gbrb;
+      swizzle<T, 3, 4, 0x01020100> yzyx, gbgr;
+      swizzle<T, 3, 4, 0x01020101> yzyy, gbgg;
+      swizzle<T, 3, 4, 0x01020102> yzyz, gbgb;
+      swizzle<T, 3, 4, 0x01020200> yzzx, gbbr;
+      swizzle<T, 3, 4, 0x01020201> yzzy, gbbg;
+      swizzle<T, 3, 4, 0x01020202> yzzz, gbbb;
+      swizzle<T, 3, 4, 0x02000000> zxxx, brrr;
+      swizzle<T, 3, 4, 0x02000001> zxxy, brrg;
+      swizzle<T, 3, 4, 0x02000002> zxxz, brrb;
+      swizzle<T, 3, 4, 0x02000100> zxyx, brgr;
+      swizzle<T, 3, 4, 0x02000101> zxyy, brgg;
+      swizzle<T, 3, 4, 0x02000102> zxyz, brgb;
+      swizzle<T, 3, 4, 0x02000200> zxzx, brbr;
+      swizzle<T, 3, 4, 0x02000201> zxzy, brbg;
+      swizzle<T, 3, 4, 0x02000202> zxzz, brbb;
+      swizzle<T, 3, 4, 0x02010000> zyxx, bgrr;
+      swizzle<T, 3, 4, 0x02010001> zyxy, bgrg;
+      swizzle<T, 3, 4, 0x02010002> zyxz, bgrb;
+      swizzle<T, 3, 4, 0x02010100> zyyx, bggr;
+      swizzle<T, 3, 4, 0x02010101> zyyy, bggg;
+      swizzle<T, 3, 4, 0x02010102> zyyz, bggb;
+      swizzle<T, 3, 4, 0x02010200> zyzx, bgbr;
+      swizzle<T, 3, 4, 0x02010201> zyzy, bgbg;
+      swizzle<T, 3, 4, 0x02010202> zyzz, bgbb;
+      swizzle<T, 3, 4, 0x02020000> zzxx, bbrr;
+      swizzle<T, 3, 4, 0x02020001> zzxy, bbrg;
+      swizzle<T, 3, 4, 0x02020002> zzxz, bbrb;
+      swizzle<T, 3, 4, 0x02020100> zzyx, bbgr;
+      swizzle<T, 3, 4, 0x02020101> zzyy, bbgg;
+      swizzle<T, 3, 4, 0x02020102> zzyz, bbgb;
+      swizzle<T, 3, 4, 0x02020200> zzzx, bbbr;
+      swizzle<T, 3, 4, 0x02020201> zzzy, bbbg;
+      swizzle<T, 3, 4, 0x02020202> zzzz, bbbb;
     };
-    struct {
-      typename swizzler_wrapper<0>::type r;
-      typename swizzler_wrapper<1>::type g;
-      typename swizzler_wrapper<2>::type b;
-    };
-    struct {
-      typename swizzler_wrapper<0>::type s;
-      typename swizzler_wrapper<1>::type t;
-      typename swizzler_wrapper<2>::type p;
-    };
-    typename swizzler_wrapper<0, 0>::type xx, rr, ss;
-    typename swizzler_wrapper<0, 1>::type xy, rg, st;
-    typename swizzler_wrapper<0, 2>::type xz, rb, sp;
-    typename swizzler_wrapper<1, 0>::type yx, gr, ts;
-    typename swizzler_wrapper<1, 1>::type yy, gg, tt;
-    typename swizzler_wrapper<1, 2>::type yz, gb, tp;
-    typename swizzler_wrapper<2, 0>::type zx, br, ps;
-    typename swizzler_wrapper<2, 1>::type zy, bg, pt;
-    typename swizzler_wrapper<2, 2>::type zz, bb, pp;
-    typename swizzler_wrapper<0, 0, 0>::type xxx, rrr, sss;
-    typename swizzler_wrapper<0, 0, 1>::type xxy, rrg, sst;
-    typename swizzler_wrapper<0, 0, 2>::type xxz, rrb, ssp;
-    typename swizzler_wrapper<0, 1, 0>::type xyx, rgr, sts;
-    typename swizzler_wrapper<0, 1, 1>::type xyy, rgg, stt;
-    typename swizzler_wrapper<0, 1, 2>::type xyz, rgb, stp;
-    typename swizzler_wrapper<0, 2, 0>::type xzx, rbr, sps;
-    typename swizzler_wrapper<0, 2, 1>::type xzy, rbg, spt;
-    typename swizzler_wrapper<0, 2, 2>::type xzz, rbb, spp;
-    typename swizzler_wrapper<1, 0, 0>::type yxx, grr, tss;
-    typename swizzler_wrapper<1, 0, 1>::type yxy, grg, tst;
-    typename swizzler_wrapper<1, 0, 2>::type yxz, grb, tsp;
-    typename swizzler_wrapper<1, 1, 0>::type yyx, ggr, tts;
-    typename swizzler_wrapper<1, 1, 1>::type yyy, ggg, ttt;
-    typename swizzler_wrapper<1, 1, 2>::type yyz, ggb, ttp;
-    typename swizzler_wrapper<1, 2, 0>::type yzx, gbr, tps;
-    typename swizzler_wrapper<1, 2, 1>::type yzy, gbg, tpt;
-    typename swizzler_wrapper<1, 2, 2>::type yzz, gbb, tpp;
-    typename swizzler_wrapper<2, 0, 0>::type zxx, brr, pss;
-    typename swizzler_wrapper<2, 0, 1>::type zxy, brg, pst;
-    typename swizzler_wrapper<2, 0, 2>::type zxz, brb, psp;
-    typename swizzler_wrapper<2, 1, 0>::type zyx, bgr, pts;
-    typename swizzler_wrapper<2, 1, 1>::type zyy, bgg, ptt;
-    typename swizzler_wrapper<2, 1, 2>::type zyz, bgb, ptp;
-    typename swizzler_wrapper<2, 2, 0>::type zzx, bbr, pps;
-    typename swizzler_wrapper<2, 2, 1>::type zzy, bbg, ppt;
-    typename swizzler_wrapper<2, 2, 2>::type zzz, bbb, ppp;
-    typename swizzler_wrapper<0, 0, 0, 0>::type xxxx, rrrr, ssss;
-    typename swizzler_wrapper<0, 0, 0, 1>::type xxxy, rrrg, ssst;
-    typename swizzler_wrapper<0, 0, 0, 2>::type xxxz, rrrb, sssp;
-    typename swizzler_wrapper<0, 0, 1, 0>::type xxyx, rrgr, ssts;
-    typename swizzler_wrapper<0, 0, 1, 1>::type xxyy, rrgg, sstt;
-    typename swizzler_wrapper<0, 0, 1, 2>::type xxyz, rrgb, sstp;
-    typename swizzler_wrapper<0, 0, 2, 0>::type xxzx, rrbr, ssps;
-    typename swizzler_wrapper<0, 0, 2, 1>::type xxzy, rrbg, sspt;
-    typename swizzler_wrapper<0, 0, 2, 2>::type xxzz, rrbb, sspp;
-    typename swizzler_wrapper<0, 1, 0, 0>::type xyxx, rgrr, stss;
-    typename swizzler_wrapper<0, 1, 0, 1>::type xyxy, rgrg, stst;
-    typename swizzler_wrapper<0, 1, 0, 2>::type xyxz, rgrb, stsp;
-    typename swizzler_wrapper<0, 1, 1, 0>::type xyyx, rggr, stts;
-    typename swizzler_wrapper<0, 1, 1, 1>::type xyyy, rggg, sttt;
-    typename swizzler_wrapper<0, 1, 1, 2>::type xyyz, rggb, sttp;
-    typename swizzler_wrapper<0, 1, 2, 0>::type xyzx, rgbr, stps;
-    typename swizzler_wrapper<0, 1, 2, 1>::type xyzy, rgbg, stpt;
-    typename swizzler_wrapper<0, 1, 2, 2>::type xyzz, rgbb, stpp;
-    typename swizzler_wrapper<0, 2, 0, 0>::type xzxx, rbrr, spss;
-    typename swizzler_wrapper<0, 2, 0, 1>::type xzxy, rbrg, spst;
-    typename swizzler_wrapper<0, 2, 0, 2>::type xzxz, rbrb, spsp;
-    typename swizzler_wrapper<0, 2, 1, 0>::type xzyx, rbgr, spts;
-    typename swizzler_wrapper<0, 2, 1, 1>::type xzyy, rbgg, sptt;
-    typename swizzler_wrapper<0, 2, 1, 2>::type xzyz, rbgb, sptp;
-    typename swizzler_wrapper<0, 2, 2, 0>::type xzzx, rbbr, spps;
-    typename swizzler_wrapper<0, 2, 2, 1>::type xzzy, rbbg, sppt;
-    typename swizzler_wrapper<0, 2, 2, 2>::type xzzz, rbbb, sppp;
-    typename swizzler_wrapper<1, 0, 0, 0>::type yxxx, grrr, tsss;
-    typename swizzler_wrapper<1, 0, 0, 1>::type yxxy, grrg, tsst;
-    typename swizzler_wrapper<1, 0, 0, 2>::type yxxz, grrb, tssp;
-    typename swizzler_wrapper<1, 0, 1, 0>::type yxyx, grgr, tsts;
-    typename swizzler_wrapper<1, 0, 1, 1>::type yxyy, grgg, tstt;
-    typename swizzler_wrapper<1, 0, 1, 2>::type yxyz, grgb, tstp;
-    typename swizzler_wrapper<1, 0, 2, 0>::type yxzx, grbr, tsps;
-    typename swizzler_wrapper<1, 0, 2, 1>::type yxzy, grbg, tspt;
-    typename swizzler_wrapper<1, 0, 2, 2>::type yxzz, grbb, tspp;
-    typename swizzler_wrapper<1, 1, 0, 0>::type yyxx, ggrr, ttss;
-    typename swizzler_wrapper<1, 1, 0, 1>::type yyxy, ggrg, ttst;
-    typename swizzler_wrapper<1, 1, 0, 2>::type yyxz, ggrb, ttsp;
-    typename swizzler_wrapper<1, 1, 1, 0>::type yyyx, gggr, ttts;
-    typename swizzler_wrapper<1, 1, 1, 1>::type yyyy, gggg, tttt;
-    typename swizzler_wrapper<1, 1, 1, 2>::type yyyz, gggb, tttp;
-    typename swizzler_wrapper<1, 1, 2, 0>::type yyzx, ggbr, ttps;
-    typename swizzler_wrapper<1, 1, 2, 1>::type yyzy, ggbg, ttpt;
-    typename swizzler_wrapper<1, 1, 2, 2>::type yyzz, ggbb, ttpp;
-    typename swizzler_wrapper<1, 2, 0, 0>::type yzxx, gbrr, tpss;
-    typename swizzler_wrapper<1, 2, 0, 1>::type yzxy, gbrg, tpst;
-    typename swizzler_wrapper<1, 2, 0, 2>::type yzxz, gbrb, tpsp;
-    typename swizzler_wrapper<1, 2, 1, 0>::type yzyx, gbgr, tpts;
-    typename swizzler_wrapper<1, 2, 1, 1>::type yzyy, gbgg, tptt;
-    typename swizzler_wrapper<1, 2, 1, 2>::type yzyz, gbgb, tptp;
-    typename swizzler_wrapper<1, 2, 2, 0>::type yzzx, gbbr, tpps;
-    typename swizzler_wrapper<1, 2, 2, 1>::type yzzy, gbbg, tppt;
-    typename swizzler_wrapper<1, 2, 2, 2>::type yzzz, gbbb, tppp;
-    typename swizzler_wrapper<2, 0, 0, 0>::type zxxx, brrr, psss;
-    typename swizzler_wrapper<2, 0, 0, 1>::type zxxy, brrg, psst;
-    typename swizzler_wrapper<2, 0, 0, 2>::type zxxz, brrb, pssp;
-    typename swizzler_wrapper<2, 0, 1, 0>::type zxyx, brgr, psts;
-    typename swizzler_wrapper<2, 0, 1, 1>::type zxyy, brgg, pstt;
-    typename swizzler_wrapper<2, 0, 1, 2>::type zxyz, brgb, pstp;
-    typename swizzler_wrapper<2, 0, 2, 0>::type zxzx, brbr, psps;
-    typename swizzler_wrapper<2, 0, 2, 1>::type zxzy, brbg, pspt;
-    typename swizzler_wrapper<2, 0, 2, 2>::type zxzz, brbb, pspp;
-    typename swizzler_wrapper<2, 1, 0, 0>::type zyxx, bgrr, ptss;
-    typename swizzler_wrapper<2, 1, 0, 1>::type zyxy, bgrg, ptst;
-    typename swizzler_wrapper<2, 1, 0, 2>::type zyxz, bgrb, ptsp;
-    typename swizzler_wrapper<2, 1, 1, 0>::type zyyx, bggr, ptts;
-    typename swizzler_wrapper<2, 1, 1, 1>::type zyyy, bggg, pttt;
-    typename swizzler_wrapper<2, 1, 1, 2>::type zyyz, bggb, pttp;
-    typename swizzler_wrapper<2, 1, 2, 0>::type zyzx, bgbr, ptps;
-    typename swizzler_wrapper<2, 1, 2, 1>::type zyzy, bgbg, ptpt;
-    typename swizzler_wrapper<2, 1, 2, 2>::type zyzz, bgbb, ptpp;
-    typename swizzler_wrapper<2, 2, 0, 0>::type zzxx, bbrr, ppss;
-    typename swizzler_wrapper<2, 2, 0, 1>::type zzxy, bbrg, ppst;
-    typename swizzler_wrapper<2, 2, 0, 2>::type zzxz, bbrb, ppsp;
-    typename swizzler_wrapper<2, 2, 1, 0>::type zzyx, bbgr, ppts;
-    typename swizzler_wrapper<2, 2, 1, 1>::type zzyy, bbgg, pptt;
-    typename swizzler_wrapper<2, 2, 1, 2>::type zzyz, bbgb, pptp;
-    typename swizzler_wrapper<2, 2, 2, 0>::type zzzx, bbbr, ppps;
-    typename swizzler_wrapper<2, 2, 2, 1>::type zzzy, bbbg, pppt;
-    typename swizzler_wrapper<2, 2, 2, 2>::type zzzz, bbbb, pppp;
   };
-};
 
-template <typename T, template <size_t...> class swizzler_wrapper>
-struct vector_base<T, 4, swizzler_wrapper> {
+  template <typename T> struct vector_base<T, 4> {
+    typedef T scalar_type;
+    union {
+      scalar_type data[4];
+      swizzle<T, 4, 1, 0x00> x, r;
+      swizzle<T, 4, 1, 0x01> y, g;
+      swizzle<T, 4, 1, 0x02> z, b;
+      swizzle<T, 4, 1, 0x03> w, a;
 
-#ifdef VML_OPENACC
-  void todev() {
-#pragma acc enter data copyin(this [0:1], data [0:4])
-  }
-  void fromdev() {
-#pragma acc exit data delete (data [0:4], this [0:1])
-  }
-  void updatehost() {
-#pragma acc update self(data [0:4])
-  }
-  void updatedev() {
-#pragma acc update device(data [0:4])
-  }
-#endif
+      swizzle<T, 4, 2, 0x0000> xx, rr;
+      swizzle<T, 4, 2, 0x0001> xy, rg;
+      swizzle<T, 4, 2, 0x0002> xz, rb;
+      swizzle<T, 4, 2, 0x0003> xw, ra;
+      swizzle<T, 4, 2, 0x0100> yx, gr;
+      swizzle<T, 4, 2, 0x0101> yy, gg;
+      swizzle<T, 4, 2, 0x0102> yz, gb;
+      swizzle<T, 4, 2, 0x0103> yw, ga;
+      swizzle<T, 4, 2, 0x0200> zx, br;
+      swizzle<T, 4, 2, 0x0201> zy, bg;
+      swizzle<T, 4, 2, 0x0202> zz, bb;
+      swizzle<T, 4, 2, 0x0203> zw, ba;
+      swizzle<T, 4, 2, 0x0300> wx, ar;
+      swizzle<T, 4, 2, 0x0301> wy, ag;
+      swizzle<T, 4, 2, 0x0302> wz, ab;
+      swizzle<T, 4, 2, 0x0303> ww, aa;
 
-  union {
-    T data[4];
-    struct {
-      typename swizzler_wrapper<0>::type x;
-      typename swizzler_wrapper<1>::type y;
-      typename swizzler_wrapper<2>::type z;
-      typename swizzler_wrapper<3>::type w;
+      swizzle<T, 4, 3, 0x000000> xxx, rrr;
+      swizzle<T, 4, 3, 0x000001> xxy, rrg;
+      swizzle<T, 4, 3, 0x000002> xxz, rrb;
+      swizzle<T, 4, 3, 0x000003> xxw, rra;
+      swizzle<T, 4, 3, 0x000100> xyx, rgr;
+      swizzle<T, 4, 3, 0x000101> xyy, rgg;
+      swizzle<T, 4, 3, 0x000102> xyz, rgb;
+      swizzle<T, 4, 3, 0x000103> xyw, rga;
+      swizzle<T, 4, 3, 0x000200> xzx, rbr;
+      swizzle<T, 4, 3, 0x000201> xzy, rbg;
+      swizzle<T, 4, 3, 0x000202> xzz, rbb;
+      swizzle<T, 4, 3, 0x000203> xzw, rba;
+      swizzle<T, 4, 3, 0x000300> xwx, rar;
+      swizzle<T, 4, 3, 0x000301> xwy, rag;
+      swizzle<T, 4, 3, 0x000302> xwz, rab;
+      swizzle<T, 4, 3, 0x000303> xww, raa;
+      swizzle<T, 4, 3, 0x010000> yxx, grr;
+      swizzle<T, 4, 3, 0x010001> yxy, grg;
+      swizzle<T, 4, 3, 0x010002> yxz, grb;
+      swizzle<T, 4, 3, 0x010003> yxw, gra;
+      swizzle<T, 4, 3, 0x010100> yyx, ggr;
+      swizzle<T, 4, 3, 0x010101> yyy, ggg;
+      swizzle<T, 4, 3, 0x010102> yyz, ggb;
+      swizzle<T, 4, 3, 0x010103> yyw, gga;
+      swizzle<T, 4, 3, 0x010200> yzx, gbr;
+      swizzle<T, 4, 3, 0x010201> yzy, gbg;
+      swizzle<T, 4, 3, 0x010202> yzz, gbb;
+      swizzle<T, 4, 3, 0x010203> yzw, gba;
+      swizzle<T, 4, 3, 0x010300> ywx, gar;
+      swizzle<T, 4, 3, 0x010301> ywy, gag;
+      swizzle<T, 4, 3, 0x010302> ywz, gab;
+      swizzle<T, 4, 3, 0x010303> yww, gaa;
+      swizzle<T, 4, 3, 0x020000> zxx, brr;
+      swizzle<T, 4, 3, 0x020001> zxy, brg;
+      swizzle<T, 4, 3, 0x020002> zxz, brb;
+      swizzle<T, 4, 3, 0x020003> zxw, bra;
+      swizzle<T, 4, 3, 0x020100> zyx, bgr;
+      swizzle<T, 4, 3, 0x020101> zyy, bgg;
+      swizzle<T, 4, 3, 0x020102> zyz, bgb;
+      swizzle<T, 4, 3, 0x020103> zyw, bga;
+      swizzle<T, 4, 3, 0x020200> zzx, bbr;
+      swizzle<T, 4, 3, 0x020201> zzy, bbg;
+      swizzle<T, 4, 3, 0x020202> zzz, bbb;
+      swizzle<T, 4, 3, 0x020203> zzw, bba;
+      swizzle<T, 4, 3, 0x020300> zwx, bar;
+      swizzle<T, 4, 3, 0x020301> zwy, bag;
+      swizzle<T, 4, 3, 0x020302> zwz, bab;
+      swizzle<T, 4, 3, 0x020303> zww, baa;
+      swizzle<T, 4, 3, 0x030000> wxx, arr;
+      swizzle<T, 4, 3, 0x030001> wxy, arg;
+      swizzle<T, 4, 3, 0x030002> wxz, arb;
+      swizzle<T, 4, 3, 0x030003> wxw, ara;
+      swizzle<T, 4, 3, 0x030100> wyx, agr;
+      swizzle<T, 4, 3, 0x030101> wyy, agg;
+      swizzle<T, 4, 3, 0x030102> wyz, agb;
+      swizzle<T, 4, 3, 0x030103> wyw, aga;
+      swizzle<T, 4, 3, 0x030200> wzx, abr;
+      swizzle<T, 4, 3, 0x030201> wzy, abg;
+      swizzle<T, 4, 3, 0x030202> wzz, abb;
+      swizzle<T, 4, 3, 0x030203> wzw, aba;
+      swizzle<T, 4, 3, 0x030300> wwx, aar;
+      swizzle<T, 4, 3, 0x030301> wwy, aag;
+      swizzle<T, 4, 3, 0x030302> wwz, aab;
+      swizzle<T, 4, 3, 0x030303> www, aaa;
+
+      swizzle<T, 4, 4, 0x00000000> xxxx, rrrr;
+      swizzle<T, 4, 4, 0x00000001> xxxy, rrrg;
+      swizzle<T, 4, 4, 0x00000002> xxxz, rrrb;
+      swizzle<T, 4, 4, 0x00000003> xxxw, rrra;
+      swizzle<T, 4, 4, 0x00000100> xxyx, rrgr;
+      swizzle<T, 4, 4, 0x00000101> xxyy, rrgg;
+      swizzle<T, 4, 4, 0x00000102> xxyz, rrgb;
+      swizzle<T, 4, 4, 0x00000103> xxyw, rrga;
+      swizzle<T, 4, 4, 0x00000200> xxzx, rrbr;
+      swizzle<T, 4, 4, 0x00000201> xxzy, rrbg;
+      swizzle<T, 4, 4, 0x00000202> xxzz, rrbb;
+      swizzle<T, 4, 4, 0x00000203> xxzw, rrba;
+      swizzle<T, 4, 4, 0x00000300> xxwx, rrar;
+      swizzle<T, 4, 4, 0x00000301> xxwy, rrag;
+      swizzle<T, 4, 4, 0x00000302> xxwz, rrab;
+      swizzle<T, 4, 4, 0x00000303> xxww, rraa;
+      swizzle<T, 4, 4, 0x00010000> xyxx, rgrr;
+      swizzle<T, 4, 4, 0x00010001> xyxy, rgrg;
+      swizzle<T, 4, 4, 0x00010002> xyxz, rgrb;
+      swizzle<T, 4, 4, 0x00010003> xyxw, rgra;
+      swizzle<T, 4, 4, 0x00010100> xyyx, rggr;
+      swizzle<T, 4, 4, 0x00010101> xyyy, rggg;
+      swizzle<T, 4, 4, 0x00010102> xyyz, rggb;
+      swizzle<T, 4, 4, 0x00010103> xyyw, rgga;
+      swizzle<T, 4, 4, 0x00010200> xyzx, rgbr;
+      swizzle<T, 4, 4, 0x00010201> xyzy, rgbg;
+      swizzle<T, 4, 4, 0x00010202> xyzz, rgbb;
+      swizzle<T, 4, 4, 0x00010203> xyzw, rgba;
+      swizzle<T, 4, 4, 0x00010300> xywx, rgar;
+      swizzle<T, 4, 4, 0x00010301> xywy, rgag;
+      swizzle<T, 4, 4, 0x00010302> xywz, rgab;
+      swizzle<T, 4, 4, 0x00010303> xyww, rgaa;
+      swizzle<T, 4, 4, 0x00020000> xzxx, rbrr;
+      swizzle<T, 4, 4, 0x00020001> xzxy, rbrg;
+      swizzle<T, 4, 4, 0x00020002> xzxz, rbrb;
+      swizzle<T, 4, 4, 0x00020003> xzxw, rbra;
+      swizzle<T, 4, 4, 0x00020100> xzyx, rbgr;
+      swizzle<T, 4, 4, 0x00020101> xzyy, rbgg;
+      swizzle<T, 4, 4, 0x00020102> xzyz, rbgb;
+      swizzle<T, 4, 4, 0x00020103> xzyw, rbga;
+      swizzle<T, 4, 4, 0x00020200> xzzx, rbbr;
+      swizzle<T, 4, 4, 0x00020201> xzzy, rbbg;
+      swizzle<T, 4, 4, 0x00020202> xzzz, rbbb;
+      swizzle<T, 4, 4, 0x00020203> xzzw, rbba;
+      swizzle<T, 4, 4, 0x00020300> xzwx, rbar;
+      swizzle<T, 4, 4, 0x00020301> xzwy, rbag;
+      swizzle<T, 4, 4, 0x00020302> xzwz, rbab;
+      swizzle<T, 4, 4, 0x00020303> xzww, rbaa;
+      swizzle<T, 4, 4, 0x00030000> xwxx, rarr;
+      swizzle<T, 4, 4, 0x00030001> xwxy, rarg;
+      swizzle<T, 4, 4, 0x00030002> xwxz, rarb;
+      swizzle<T, 4, 4, 0x00030003> xwxw, rara;
+      swizzle<T, 4, 4, 0x00030100> xwyx, ragr;
+      swizzle<T, 4, 4, 0x00030101> xwyy, ragg;
+      swizzle<T, 4, 4, 0x00030102> xwyz, ragb;
+      swizzle<T, 4, 4, 0x00030103> xwyw, raga;
+      swizzle<T, 4, 4, 0x00030200> xwzx, rabr;
+      swizzle<T, 4, 4, 0x00030201> xwzy, rabg;
+      swizzle<T, 4, 4, 0x00030202> xwzz, rabb;
+      swizzle<T, 4, 4, 0x00030203> xwzw, raba;
+      swizzle<T, 4, 4, 0x00030300> xwwx, raar;
+      swizzle<T, 4, 4, 0x00030301> xwwy, raag;
+      swizzle<T, 4, 4, 0x00030302> xwwz, raab;
+      swizzle<T, 4, 4, 0x00030303> xwww, raaa;
+      swizzle<T, 4, 4, 0x01000000> yxxx, grrr;
+      swizzle<T, 4, 4, 0x01000001> yxxy, grrg;
+      swizzle<T, 4, 4, 0x01000002> yxxz, grrb;
+      swizzle<T, 4, 4, 0x01000003> yxxw, grra;
+      swizzle<T, 4, 4, 0x01000100> yxyx, grgr;
+      swizzle<T, 4, 4, 0x01000101> yxyy, grgg;
+      swizzle<T, 4, 4, 0x01000102> yxyz, grgb;
+      swizzle<T, 4, 4, 0x01000103> yxyw, grga;
+      swizzle<T, 4, 4, 0x01000200> yxzx, grbr;
+      swizzle<T, 4, 4, 0x01000201> yxzy, grbg;
+      swizzle<T, 4, 4, 0x01000202> yxzz, grbb;
+      swizzle<T, 4, 4, 0x01000203> yxzw, grba;
+      swizzle<T, 4, 4, 0x01000300> yxwx, grar;
+      swizzle<T, 4, 4, 0x01000301> yxwy, grag;
+      swizzle<T, 4, 4, 0x01000302> yxwz, grab;
+      swizzle<T, 4, 4, 0x01000303> yxww, graa;
+      swizzle<T, 4, 4, 0x01010000> yyxx, ggrr;
+      swizzle<T, 4, 4, 0x01010001> yyxy, ggrg;
+      swizzle<T, 4, 4, 0x01010002> yyxz, ggrb;
+      swizzle<T, 4, 4, 0x01010003> yyxw, ggra;
+      swizzle<T, 4, 4, 0x01010100> yyyx, gggr;
+      swizzle<T, 4, 4, 0x01010101> yyyy, gggg;
+      swizzle<T, 4, 4, 0x01010102> yyyz, gggb;
+      swizzle<T, 4, 4, 0x01010103> yyyw, ggga;
+      swizzle<T, 4, 4, 0x01010200> yyzx, ggbr;
+      swizzle<T, 4, 4, 0x01010201> yyzy, ggbg;
+      swizzle<T, 4, 4, 0x01010202> yyzz, ggbb;
+      swizzle<T, 4, 4, 0x01010203> yyzw, ggba;
+      swizzle<T, 4, 4, 0x01010300> yywx, ggar;
+      swizzle<T, 4, 4, 0x01010301> yywy, ggag;
+      swizzle<T, 4, 4, 0x01010302> yywz, ggab;
+      swizzle<T, 4, 4, 0x01010303> yyww, ggaa;
+      swizzle<T, 4, 4, 0x01020000> yzxx, gbrr;
+      swizzle<T, 4, 4, 0x01020001> yzxy, gbrg;
+      swizzle<T, 4, 4, 0x01020002> yzxz, gbrb;
+      swizzle<T, 4, 4, 0x01020003> yzxw, gbra;
+      swizzle<T, 4, 4, 0x01020100> yzyx, gbgr;
+      swizzle<T, 4, 4, 0x01020101> yzyy, gbgg;
+      swizzle<T, 4, 4, 0x01020102> yzyz, gbgb;
+      swizzle<T, 4, 4, 0x01020103> yzyw, gbga;
+      swizzle<T, 4, 4, 0x01020200> yzzx, gbbr;
+      swizzle<T, 4, 4, 0x01020201> yzzy, gbbg;
+      swizzle<T, 4, 4, 0x01020202> yzzz, gbbb;
+      swizzle<T, 4, 4, 0x01020203> yzzw, gbba;
+      swizzle<T, 4, 4, 0x01020300> yzwx, gbar;
+      swizzle<T, 4, 4, 0x01020301> yzwy, gbag;
+      swizzle<T, 4, 4, 0x01020302> yzwz, gbab;
+      swizzle<T, 4, 4, 0x01020303> yzww, gbaa;
+      swizzle<T, 4, 4, 0x01030000> ywxx, garr;
+      swizzle<T, 4, 4, 0x01030001> ywxy, garg;
+      swizzle<T, 4, 4, 0x01030002> ywxz, garb;
+      swizzle<T, 4, 4, 0x01030003> ywxw, gara;
+      swizzle<T, 4, 4, 0x01030100> ywyx, gagr;
+      swizzle<T, 4, 4, 0x01030101> ywyy, gagg;
+      swizzle<T, 4, 4, 0x01030102> ywyz, gagb;
+      swizzle<T, 4, 4, 0x01030103> ywyw, gaga;
+      swizzle<T, 4, 4, 0x01030200> ywzx, gabr;
+      swizzle<T, 4, 4, 0x01030201> ywzy, gabg;
+      swizzle<T, 4, 4, 0x01030202> ywzz, gabb;
+      swizzle<T, 4, 4, 0x01030203> ywzw, gaba;
+      swizzle<T, 4, 4, 0x01030300> ywwx, gaar;
+      swizzle<T, 4, 4, 0x01030301> ywwy, gaag;
+      swizzle<T, 4, 4, 0x01030302> ywwz, gaab;
+      swizzle<T, 4, 4, 0x01030303> ywww, gaaa;
+      swizzle<T, 4, 4, 0x02000000> zxxx, brrr;
+      swizzle<T, 4, 4, 0x02000001> zxxy, brrg;
+      swizzle<T, 4, 4, 0x02000002> zxxz, brrb;
+      swizzle<T, 4, 4, 0x02000003> zxxw, brra;
+      swizzle<T, 4, 4, 0x02000100> zxyx, brgr;
+      swizzle<T, 4, 4, 0x02000101> zxyy, brgg;
+      swizzle<T, 4, 4, 0x02000102> zxyz, brgb;
+      swizzle<T, 4, 4, 0x02000103> zxyw, brga;
+      swizzle<T, 4, 4, 0x02000200> zxzx, brbr;
+      swizzle<T, 4, 4, 0x02000201> zxzy, brbg;
+      swizzle<T, 4, 4, 0x02000202> zxzz, brbb;
+      swizzle<T, 4, 4, 0x02000203> zxzw, brba;
+      swizzle<T, 4, 4, 0x02000300> zxwx, brar;
+      swizzle<T, 4, 4, 0x02000301> zxwy, brag;
+      swizzle<T, 4, 4, 0x02000302> zxwz, brab;
+      swizzle<T, 4, 4, 0x02000303> zxww, braa;
+      swizzle<T, 4, 4, 0x02010000> zyxx, bgrr;
+      swizzle<T, 4, 4, 0x02010001> zyxy, bgrg;
+      swizzle<T, 4, 4, 0x02010002> zyxz, bgrb;
+      swizzle<T, 4, 4, 0x02010003> zyxw, bgra;
+      swizzle<T, 4, 4, 0x02010100> zyyx, bggr;
+      swizzle<T, 4, 4, 0x02010101> zyyy, bggg;
+      swizzle<T, 4, 4, 0x02010102> zyyz, bggb;
+      swizzle<T, 4, 4, 0x02010103> zyyw, bgga;
+      swizzle<T, 4, 4, 0x02010200> zyzx, bgbr;
+      swizzle<T, 4, 4, 0x02010201> zyzy, bgbg;
+      swizzle<T, 4, 4, 0x02010202> zyzz, bgbb;
+      swizzle<T, 4, 4, 0x02010203> zyzw, bgba;
+      swizzle<T, 4, 4, 0x02010300> zywx, bgar;
+      swizzle<T, 4, 4, 0x02010301> zywy, bgag;
+      swizzle<T, 4, 4, 0x02010302> zywz, bgab;
+      swizzle<T, 4, 4, 0x02010303> zyww, bgaa;
+      swizzle<T, 4, 4, 0x02020000> zzxx, bbrr;
+      swizzle<T, 4, 4, 0x02020001> zzxy, bbrg;
+      swizzle<T, 4, 4, 0x02020002> zzxz, bbrb;
+      swizzle<T, 4, 4, 0x02020003> zzxw, bbra;
+      swizzle<T, 4, 4, 0x02020100> zzyx, bbgr;
+      swizzle<T, 4, 4, 0x02020101> zzyy, bbgg;
+      swizzle<T, 4, 4, 0x02020102> zzyz, bbgb;
+      swizzle<T, 4, 4, 0x02020103> zzyw, bbga;
+      swizzle<T, 4, 4, 0x02020200> zzzx, bbbr;
+      swizzle<T, 4, 4, 0x02020201> zzzy, bbbg;
+      swizzle<T, 4, 4, 0x02020202> zzzz, bbbb;
+      swizzle<T, 4, 4, 0x02020203> zzzw, bbba;
+      swizzle<T, 4, 4, 0x02020300> zzwx, bbar;
+      swizzle<T, 4, 4, 0x02020301> zzwy, bbag;
+      swizzle<T, 4, 4, 0x02020302> zzwz, bbab;
+      swizzle<T, 4, 4, 0x02020303> zzww, bbaa;
+      swizzle<T, 4, 4, 0x02030000> zwxx, barr;
+      swizzle<T, 4, 4, 0x02030001> zwxy, barg;
+      swizzle<T, 4, 4, 0x02030002> zwxz, barb;
+      swizzle<T, 4, 4, 0x02030003> zwxw, bara;
+      swizzle<T, 4, 4, 0x02030100> zwyx, bagr;
+      swizzle<T, 4, 4, 0x02030101> zwyy, bagg;
+      swizzle<T, 4, 4, 0x02030102> zwyz, bagb;
+      swizzle<T, 4, 4, 0x02030103> zwyw, baga;
+      swizzle<T, 4, 4, 0x02030200> zwzx, babr;
+      swizzle<T, 4, 4, 0x02030201> zwzy, babg;
+      swizzle<T, 4, 4, 0x02030202> zwzz, babb;
+      swizzle<T, 4, 4, 0x02030203> zwzw, baba;
+      swizzle<T, 4, 4, 0x02030300> zwwx, baar;
+      swizzle<T, 4, 4, 0x02030301> zwwy, baag;
+      swizzle<T, 4, 4, 0x02030302> zwwz, baab;
+      swizzle<T, 4, 4, 0x02030303> zwww, baaa;
+      swizzle<T, 4, 4, 0x03000000> wxxx, arrr;
+      swizzle<T, 4, 4, 0x03000001> wxxy, arrg;
+      swizzle<T, 4, 4, 0x03000002> wxxz, arrb;
+      swizzle<T, 4, 4, 0x03000003> wxxw, arra;
+      swizzle<T, 4, 4, 0x03000100> wxyx, argr;
+      swizzle<T, 4, 4, 0x03000101> wxyy, argg;
+      swizzle<T, 4, 4, 0x03000102> wxyz, argb;
+      swizzle<T, 4, 4, 0x03000103> wxyw, arga;
+      swizzle<T, 4, 4, 0x03000200> wxzx, arbr;
+      swizzle<T, 4, 4, 0x03000201> wxzy, arbg;
+      swizzle<T, 4, 4, 0x03000202> wxzz, arbb;
+      swizzle<T, 4, 4, 0x03000203> wxzw, arba;
+      swizzle<T, 4, 4, 0x03000300> wxwx, arar;
+      swizzle<T, 4, 4, 0x03000301> wxwy, arag;
+      swizzle<T, 4, 4, 0x03000302> wxwz, arab;
+      swizzle<T, 4, 4, 0x03000303> wxww, araa;
+      swizzle<T, 4, 4, 0x03010000> wyxx, agrr;
+      swizzle<T, 4, 4, 0x03010001> wyxy, agrg;
+      swizzle<T, 4, 4, 0x03010002> wyxz, agrb;
+      swizzle<T, 4, 4, 0x03010003> wyxw, agra;
+      swizzle<T, 4, 4, 0x03010100> wyyx, aggr;
+      swizzle<T, 4, 4, 0x03010101> wyyy, aggg;
+      swizzle<T, 4, 4, 0x03010102> wyyz, aggb;
+      swizzle<T, 4, 4, 0x03010103> wyyw, agga;
+      swizzle<T, 4, 4, 0x03010200> wyzx, agbr;
+      swizzle<T, 4, 4, 0x03010201> wyzy, agbg;
+      swizzle<T, 4, 4, 0x03010202> wyzz, agbb;
+      swizzle<T, 4, 4, 0x03010203> wyzw, agba;
+      swizzle<T, 4, 4, 0x03010300> wywx, agar;
+      swizzle<T, 4, 4, 0x03010301> wywy, agag;
+      swizzle<T, 4, 4, 0x03010302> wywz, agab;
+      swizzle<T, 4, 4, 0x03010303> wyww, agaa;
+      swizzle<T, 4, 4, 0x03020000> wzxx, abrr;
+      swizzle<T, 4, 4, 0x03020001> wzxy, abrg;
+      swizzle<T, 4, 4, 0x03020002> wzxz, abrb;
+      swizzle<T, 4, 4, 0x03020003> wzxw, abra;
+      swizzle<T, 4, 4, 0x03020100> wzyx, abgr;
+      swizzle<T, 4, 4, 0x03020101> wzyy, abgg;
+      swizzle<T, 4, 4, 0x03020102> wzyz, abgb;
+      swizzle<T, 4, 4, 0x03020103> wzyw, abga;
+      swizzle<T, 4, 4, 0x03020200> wzzx, abbr;
+      swizzle<T, 4, 4, 0x03020201> wzzy, abbg;
+      swizzle<T, 4, 4, 0x03020202> wzzz, abbb;
+      swizzle<T, 4, 4, 0x03020203> wzzw, abba;
+      swizzle<T, 4, 4, 0x03020300> wzwx, abar;
+      swizzle<T, 4, 4, 0x03020301> wzwy, abag;
+      swizzle<T, 4, 4, 0x03020302> wzwz, abab;
+      swizzle<T, 4, 4, 0x03020303> wzww, abaa;
+      swizzle<T, 4, 4, 0x03030000> wwxx, aarr;
+      swizzle<T, 4, 4, 0x03030001> wwxy, aarg;
+      swizzle<T, 4, 4, 0x03030002> wwxz, aarb;
+      swizzle<T, 4, 4, 0x03030003> wwxw, aara;
+      swizzle<T, 4, 4, 0x03030100> wwyx, aagr;
+      swizzle<T, 4, 4, 0x03030101> wwyy, aagg;
+      swizzle<T, 4, 4, 0x03030102> wwyz, aagb;
+      swizzle<T, 4, 4, 0x03030103> wwyw, aaga;
+      swizzle<T, 4, 4, 0x03030200> wwzx, aabr;
+      swizzle<T, 4, 4, 0x03030201> wwzy, aabg;
+      swizzle<T, 4, 4, 0x03030202> wwzz, aabb;
+      swizzle<T, 4, 4, 0x03030203> wwzw, aaba;
+      swizzle<T, 4, 4, 0x03030300> wwwx, aaar;
+      swizzle<T, 4, 4, 0x03030301> wwwy, aaag;
+      swizzle<T, 4, 4, 0x03030302> wwwz, aaab;
+      swizzle<T, 4, 4, 0x03030303> wwww, aaaa;
     };
-    struct {
-      typename swizzler_wrapper<0>::type r;
-      typename swizzler_wrapper<1>::type g;
-      typename swizzler_wrapper<2>::type b;
-      typename swizzler_wrapper<3>::type a;
-    };
-    struct {
-      typename swizzler_wrapper<0>::type s;
-      typename swizzler_wrapper<1>::type t;
-      typename swizzler_wrapper<2>::type p;
-      typename swizzler_wrapper<3>::type q;
-    };
-    typename swizzler_wrapper<0, 0>::type xx, rr, ss;
-    typename swizzler_wrapper<0, 1>::type xy, rg, st;
-    typename swizzler_wrapper<0, 2>::type xz, rb, sp;
-    typename swizzler_wrapper<0, 3>::type xw, ra, sq;
-    typename swizzler_wrapper<1, 0>::type yx, gr, ts;
-    typename swizzler_wrapper<1, 1>::type yy, gg, tt;
-    typename swizzler_wrapper<1, 2>::type yz, gb, tp;
-    typename swizzler_wrapper<1, 3>::type yw, ga, tq;
-    typename swizzler_wrapper<2, 0>::type zx, br, ps;
-    typename swizzler_wrapper<2, 1>::type zy, bg, pt;
-    typename swizzler_wrapper<2, 2>::type zz, bb, pp;
-    typename swizzler_wrapper<2, 3>::type zw, ba, pq;
-    typename swizzler_wrapper<3, 0>::type wx, ar, qs;
-    typename swizzler_wrapper<3, 1>::type wy, ag, qt;
-    typename swizzler_wrapper<3, 2>::type wz, ab, qp;
-    typename swizzler_wrapper<3, 3>::type ww, aa, qq;
-    typename swizzler_wrapper<0, 0, 0>::type xxx, rrr, sss;
-    typename swizzler_wrapper<0, 0, 1>::type xxy, rrg, sst;
-    typename swizzler_wrapper<0, 0, 2>::type xxz, rrb, ssp;
-    typename swizzler_wrapper<0, 0, 3>::type xxw, rra, ssq;
-    typename swizzler_wrapper<0, 1, 0>::type xyx, rgr, sts;
-    typename swizzler_wrapper<0, 1, 1>::type xyy, rgg, stt;
-    typename swizzler_wrapper<0, 1, 2>::type xyz, rgb, stp;
-    typename swizzler_wrapper<0, 1, 3>::type xyw, rga, stq;
-    typename swizzler_wrapper<0, 2, 0>::type xzx, rbr, sps;
-    typename swizzler_wrapper<0, 2, 1>::type xzy, rbg, spt;
-    typename swizzler_wrapper<0, 2, 2>::type xzz, rbb, spp;
-    typename swizzler_wrapper<0, 2, 3>::type xzw, rba, spq;
-    typename swizzler_wrapper<0, 3, 0>::type xwx, rar, sqs;
-    typename swizzler_wrapper<0, 3, 1>::type xwy, rag, sqt;
-    typename swizzler_wrapper<0, 3, 2>::type xwz, rab, sqp;
-    typename swizzler_wrapper<0, 3, 3>::type xww, raa, sqq;
-    typename swizzler_wrapper<1, 0, 0>::type yxx, grr, tss;
-    typename swizzler_wrapper<1, 0, 1>::type yxy, grg, tst;
-    typename swizzler_wrapper<1, 0, 2>::type yxz, grb, tsp;
-    typename swizzler_wrapper<1, 0, 3>::type yxw, gra, tsq;
-    typename swizzler_wrapper<1, 1, 0>::type yyx, ggr, tts;
-    typename swizzler_wrapper<1, 1, 1>::type yyy, ggg, ttt;
-    typename swizzler_wrapper<1, 1, 2>::type yyz, ggb, ttp;
-    typename swizzler_wrapper<1, 1, 3>::type yyw, gga, ttq;
-    typename swizzler_wrapper<1, 2, 0>::type yzx, gbr, tps;
-    typename swizzler_wrapper<1, 2, 1>::type yzy, gbg, tpt;
-    typename swizzler_wrapper<1, 2, 2>::type yzz, gbb, tpp;
-    typename swizzler_wrapper<1, 2, 3>::type yzw, gba, tpq;
-    typename swizzler_wrapper<1, 3, 0>::type ywx, gar, tqs;
-    typename swizzler_wrapper<1, 3, 1>::type ywy, gag, tqt;
-    typename swizzler_wrapper<1, 3, 2>::type ywz, gab, tqp;
-    typename swizzler_wrapper<1, 3, 3>::type yww, gaa, tqq;
-    typename swizzler_wrapper<2, 0, 0>::type zxx, brr, pss;
-    typename swizzler_wrapper<2, 0, 1>::type zxy, brg, pst;
-    typename swizzler_wrapper<2, 0, 2>::type zxz, brb, psp;
-    typename swizzler_wrapper<2, 0, 3>::type zxw, bra, psq;
-    typename swizzler_wrapper<2, 1, 0>::type zyx, bgr, pts;
-    typename swizzler_wrapper<2, 1, 1>::type zyy, bgg, ptt;
-    typename swizzler_wrapper<2, 1, 2>::type zyz, bgb, ptp;
-    typename swizzler_wrapper<2, 1, 3>::type zyw, bga, ptq;
-    typename swizzler_wrapper<2, 2, 0>::type zzx, bbr, pps;
-    typename swizzler_wrapper<2, 2, 1>::type zzy, bbg, ppt;
-    typename swizzler_wrapper<2, 2, 2>::type zzz, bbb, ppp;
-    typename swizzler_wrapper<2, 2, 3>::type zzw, bba, ppq;
-    typename swizzler_wrapper<2, 3, 0>::type zwx, bar, pqs;
-    typename swizzler_wrapper<2, 3, 1>::type zwy, bag, pqt;
-    typename swizzler_wrapper<2, 3, 2>::type zwz, bab, pqp;
-    typename swizzler_wrapper<2, 3, 3>::type zww, baa, pqq;
-    typename swizzler_wrapper<3, 0, 0>::type wxx, arr, qss;
-    typename swizzler_wrapper<3, 0, 1>::type wxy, arg, qst;
-    typename swizzler_wrapper<3, 0, 2>::type wxz, arb, qsp;
-    typename swizzler_wrapper<3, 0, 3>::type wxw, ara, qsq;
-    typename swizzler_wrapper<3, 1, 0>::type wyx, agr, qts;
-    typename swizzler_wrapper<3, 1, 1>::type wyy, agg, qtt;
-    typename swizzler_wrapper<3, 1, 2>::type wyz, agb, qtp;
-    typename swizzler_wrapper<3, 1, 3>::type wyw, aga, qtq;
-    typename swizzler_wrapper<3, 2, 0>::type wzx, abr, qps;
-    typename swizzler_wrapper<3, 2, 1>::type wzy, abg, qpt;
-    typename swizzler_wrapper<3, 2, 2>::type wzz, abb, qpp;
-    typename swizzler_wrapper<3, 2, 3>::type wzw, aba, qpq;
-    typename swizzler_wrapper<3, 3, 0>::type wwx, aar, qqs;
-    typename swizzler_wrapper<3, 3, 1>::type wwy, aag, qqt;
-    typename swizzler_wrapper<3, 3, 2>::type wwz, aab, qqp;
-    typename swizzler_wrapper<3, 3, 3>::type www, aaa, qqq;
-    typename swizzler_wrapper<0, 0, 0, 0>::type xxxx, rrrr, ssss;
-    typename swizzler_wrapper<0, 0, 0, 1>::type xxxy, rrrg, ssst;
-    typename swizzler_wrapper<0, 0, 0, 2>::type xxxz, rrrb, sssp;
-    typename swizzler_wrapper<0, 0, 0, 3>::type xxxw, rrra, sssq;
-    typename swizzler_wrapper<0, 0, 1, 0>::type xxyx, rrgr, ssts;
-    typename swizzler_wrapper<0, 0, 1, 1>::type xxyy, rrgg, sstt;
-    typename swizzler_wrapper<0, 0, 1, 2>::type xxyz, rrgb, sstp;
-    typename swizzler_wrapper<0, 0, 1, 3>::type xxyw, rrga, sstq;
-    typename swizzler_wrapper<0, 0, 2, 0>::type xxzx, rrbr, ssps;
-    typename swizzler_wrapper<0, 0, 2, 1>::type xxzy, rrbg, sspt;
-    typename swizzler_wrapper<0, 0, 2, 2>::type xxzz, rrbb, sspp;
-    typename swizzler_wrapper<0, 0, 2, 3>::type xxzw, rrba, sspq;
-    typename swizzler_wrapper<0, 0, 3, 0>::type xxwx, rrar, ssqs;
-    typename swizzler_wrapper<0, 0, 3, 1>::type xxwy, rrag, ssqt;
-    typename swizzler_wrapper<0, 0, 3, 2>::type xxwz, rrab, ssqp;
-    typename swizzler_wrapper<0, 0, 3, 3>::type xxww, rraa, ssqq;
-    typename swizzler_wrapper<0, 1, 0, 0>::type xyxx, rgrr, stss;
-    typename swizzler_wrapper<0, 1, 0, 1>::type xyxy, rgrg, stst;
-    typename swizzler_wrapper<0, 1, 0, 2>::type xyxz, rgrb, stsp;
-    typename swizzler_wrapper<0, 1, 0, 3>::type xyxw, rgra, stsq;
-    typename swizzler_wrapper<0, 1, 1, 0>::type xyyx, rggr, stts;
-    typename swizzler_wrapper<0, 1, 1, 1>::type xyyy, rggg, sttt;
-    typename swizzler_wrapper<0, 1, 1, 2>::type xyyz, rggb, sttp;
-    typename swizzler_wrapper<0, 1, 1, 3>::type xyyw, rgga, sttq;
-    typename swizzler_wrapper<0, 1, 2, 0>::type xyzx, rgbr, stps;
-    typename swizzler_wrapper<0, 1, 2, 1>::type xyzy, rgbg, stpt;
-    typename swizzler_wrapper<0, 1, 2, 2>::type xyzz, rgbb, stpp;
-    typename swizzler_wrapper<0, 1, 2, 3>::type xyzw, rgba, stpq;
-    typename swizzler_wrapper<0, 1, 3, 0>::type xywx, rgar, stqs;
-    typename swizzler_wrapper<0, 1, 3, 1>::type xywy, rgag, stqt;
-    typename swizzler_wrapper<0, 1, 3, 2>::type xywz, rgab, stqp;
-    typename swizzler_wrapper<0, 1, 3, 3>::type xyww, rgaa, stqq;
-    typename swizzler_wrapper<0, 2, 0, 0>::type xzxx, rbrr, spss;
-    typename swizzler_wrapper<0, 2, 0, 1>::type xzxy, rbrg, spst;
-    typename swizzler_wrapper<0, 2, 0, 2>::type xzxz, rbrb, spsp;
-    typename swizzler_wrapper<0, 2, 0, 3>::type xzxw, rbra, spsq;
-    typename swizzler_wrapper<0, 2, 1, 0>::type xzyx, rbgr, spts;
-    typename swizzler_wrapper<0, 2, 1, 1>::type xzyy, rbgg, sptt;
-    typename swizzler_wrapper<0, 2, 1, 2>::type xzyz, rbgb, sptp;
-    typename swizzler_wrapper<0, 2, 1, 3>::type xzyw, rbga, sptq;
-    typename swizzler_wrapper<0, 2, 2, 0>::type xzzx, rbbr, spps;
-    typename swizzler_wrapper<0, 2, 2, 1>::type xzzy, rbbg, sppt;
-    typename swizzler_wrapper<0, 2, 2, 2>::type xzzz, rbbb, sppp;
-    typename swizzler_wrapper<0, 2, 2, 3>::type xzzw, rbba, sppq;
-    typename swizzler_wrapper<0, 2, 3, 0>::type xzwx, rbar, spqs;
-    typename swizzler_wrapper<0, 2, 3, 1>::type xzwy, rbag, spqt;
-    typename swizzler_wrapper<0, 2, 3, 2>::type xzwz, rbab, spqp;
-    typename swizzler_wrapper<0, 2, 3, 3>::type xzww, rbaa, spqq;
-    typename swizzler_wrapper<0, 3, 0, 0>::type xwxx, rarr, sqss;
-    typename swizzler_wrapper<0, 3, 0, 1>::type xwxy, rarg, sqst;
-    typename swizzler_wrapper<0, 3, 0, 2>::type xwxz, rarb, sqsp;
-    typename swizzler_wrapper<0, 3, 0, 3>::type xwxw, rara, sqsq;
-    typename swizzler_wrapper<0, 3, 1, 0>::type xwyx, ragr, sqts;
-    typename swizzler_wrapper<0, 3, 1, 1>::type xwyy, ragg, sqtt;
-    typename swizzler_wrapper<0, 3, 1, 2>::type xwyz, ragb, sqtp;
-    typename swizzler_wrapper<0, 3, 1, 3>::type xwyw, raga, sqtq;
-    typename swizzler_wrapper<0, 3, 2, 0>::type xwzx, rabr, sqps;
-    typename swizzler_wrapper<0, 3, 2, 1>::type xwzy, rabg, sqpt;
-    typename swizzler_wrapper<0, 3, 2, 2>::type xwzz, rabb, sqpp;
-    typename swizzler_wrapper<0, 3, 2, 3>::type xwzw, raba, sqpq;
-    typename swizzler_wrapper<0, 3, 3, 0>::type xwwx, raar, sqqs;
-    typename swizzler_wrapper<0, 3, 3, 1>::type xwwy, raag, sqqt;
-    typename swizzler_wrapper<0, 3, 3, 2>::type xwwz, raab, sqqp;
-    typename swizzler_wrapper<0, 3, 3, 3>::type xwww, raaa, sqqq;
-    typename swizzler_wrapper<1, 0, 0, 0>::type yxxx, grrr, tsss;
-    typename swizzler_wrapper<1, 0, 0, 1>::type yxxy, grrg, tsst;
-    typename swizzler_wrapper<1, 0, 0, 2>::type yxxz, grrb, tssp;
-    typename swizzler_wrapper<1, 0, 0, 3>::type yxxw, grra, tssq;
-    typename swizzler_wrapper<1, 0, 1, 0>::type yxyx, grgr, tsts;
-    typename swizzler_wrapper<1, 0, 1, 1>::type yxyy, grgg, tstt;
-    typename swizzler_wrapper<1, 0, 1, 2>::type yxyz, grgb, tstp;
-    typename swizzler_wrapper<1, 0, 1, 3>::type yxyw, grga, tstq;
-    typename swizzler_wrapper<1, 0, 2, 0>::type yxzx, grbr, tsps;
-    typename swizzler_wrapper<1, 0, 2, 1>::type yxzy, grbg, tspt;
-    typename swizzler_wrapper<1, 0, 2, 2>::type yxzz, grbb, tspp;
-    typename swizzler_wrapper<1, 0, 2, 3>::type yxzw, grba, tspq;
-    typename swizzler_wrapper<1, 0, 3, 0>::type yxwx, grar, tsqs;
-    typename swizzler_wrapper<1, 0, 3, 1>::type yxwy, grag, tsqt;
-    typename swizzler_wrapper<1, 0, 3, 2>::type yxwz, grab, tsqp;
-    typename swizzler_wrapper<1, 0, 3, 3>::type yxww, graa, tsqq;
-    typename swizzler_wrapper<1, 1, 0, 0>::type yyxx, ggrr, ttss;
-    typename swizzler_wrapper<1, 1, 0, 1>::type yyxy, ggrg, ttst;
-    typename swizzler_wrapper<1, 1, 0, 2>::type yyxz, ggrb, ttsp;
-    typename swizzler_wrapper<1, 1, 0, 3>::type yyxw, ggra, ttsq;
-    typename swizzler_wrapper<1, 1, 1, 0>::type yyyx, gggr, ttts;
-    typename swizzler_wrapper<1, 1, 1, 1>::type yyyy, gggg, tttt;
-    typename swizzler_wrapper<1, 1, 1, 2>::type yyyz, gggb, tttp;
-    typename swizzler_wrapper<1, 1, 1, 3>::type yyyw, ggga, tttq;
-    typename swizzler_wrapper<1, 1, 2, 0>::type yyzx, ggbr, ttps;
-    typename swizzler_wrapper<1, 1, 2, 1>::type yyzy, ggbg, ttpt;
-    typename swizzler_wrapper<1, 1, 2, 2>::type yyzz, ggbb, ttpp;
-    typename swizzler_wrapper<1, 1, 2, 3>::type yyzw, ggba, ttpq;
-    typename swizzler_wrapper<1, 1, 3, 0>::type yywx, ggar, ttqs;
-    typename swizzler_wrapper<1, 1, 3, 1>::type yywy, ggag, ttqt;
-    typename swizzler_wrapper<1, 1, 3, 2>::type yywz, ggab, ttqp;
-    typename swizzler_wrapper<1, 1, 3, 3>::type yyww, ggaa, ttqq;
-    typename swizzler_wrapper<1, 2, 0, 0>::type yzxx, gbrr, tpss;
-    typename swizzler_wrapper<1, 2, 0, 1>::type yzxy, gbrg, tpst;
-    typename swizzler_wrapper<1, 2, 0, 2>::type yzxz, gbrb, tpsp;
-    typename swizzler_wrapper<1, 2, 0, 3>::type yzxw, gbra, tpsq;
-    typename swizzler_wrapper<1, 2, 1, 0>::type yzyx, gbgr, tpts;
-    typename swizzler_wrapper<1, 2, 1, 1>::type yzyy, gbgg, tptt;
-    typename swizzler_wrapper<1, 2, 1, 2>::type yzyz, gbgb, tptp;
-    typename swizzler_wrapper<1, 2, 1, 3>::type yzyw, gbga, tptq;
-    typename swizzler_wrapper<1, 2, 2, 0>::type yzzx, gbbr, tpps;
-    typename swizzler_wrapper<1, 2, 2, 1>::type yzzy, gbbg, tppt;
-    typename swizzler_wrapper<1, 2, 2, 2>::type yzzz, gbbb, tppp;
-    typename swizzler_wrapper<1, 2, 2, 3>::type yzzw, gbba, tppq;
-    typename swizzler_wrapper<1, 2, 3, 0>::type yzwx, gbar, tpqs;
-    typename swizzler_wrapper<1, 2, 3, 1>::type yzwy, gbag, tpqt;
-    typename swizzler_wrapper<1, 2, 3, 2>::type yzwz, gbab, tpqp;
-    typename swizzler_wrapper<1, 2, 3, 3>::type yzww, gbaa, tpqq;
-    typename swizzler_wrapper<1, 3, 0, 0>::type ywxx, garr, tqss;
-    typename swizzler_wrapper<1, 3, 0, 1>::type ywxy, garg, tqst;
-    typename swizzler_wrapper<1, 3, 0, 2>::type ywxz, garb, tqsp;
-    typename swizzler_wrapper<1, 3, 0, 3>::type ywxw, gara, tqsq;
-    typename swizzler_wrapper<1, 3, 1, 0>::type ywyx, gagr, tqts;
-    typename swizzler_wrapper<1, 3, 1, 1>::type ywyy, gagg, tqtt;
-    typename swizzler_wrapper<1, 3, 1, 2>::type ywyz, gagb, tqtp;
-    typename swizzler_wrapper<1, 3, 1, 3>::type ywyw, gaga, tqtq;
-    typename swizzler_wrapper<1, 3, 2, 0>::type ywzx, gabr, tqps;
-    typename swizzler_wrapper<1, 3, 2, 1>::type ywzy, gabg, tqpt;
-    typename swizzler_wrapper<1, 3, 2, 2>::type ywzz, gabb, tqpp;
-    typename swizzler_wrapper<1, 3, 2, 3>::type ywzw, gaba, tqpq;
-    typename swizzler_wrapper<1, 3, 3, 0>::type ywwx, gaar, tqqs;
-    typename swizzler_wrapper<1, 3, 3, 1>::type ywwy, gaag, tqqt;
-    typename swizzler_wrapper<1, 3, 3, 2>::type ywwz, gaab, tqqp;
-    typename swizzler_wrapper<1, 3, 3, 3>::type ywww, gaaa, tqqq;
-    typename swizzler_wrapper<2, 0, 0, 0>::type zxxx, brrr, psss;
-    typename swizzler_wrapper<2, 0, 0, 1>::type zxxy, brrg, psst;
-    typename swizzler_wrapper<2, 0, 0, 2>::type zxxz, brrb, pssp;
-    typename swizzler_wrapper<2, 0, 0, 3>::type zxxw, brra, pssq;
-    typename swizzler_wrapper<2, 0, 1, 0>::type zxyx, brgr, psts;
-    typename swizzler_wrapper<2, 0, 1, 1>::type zxyy, brgg, pstt;
-    typename swizzler_wrapper<2, 0, 1, 2>::type zxyz, brgb, pstp;
-    typename swizzler_wrapper<2, 0, 1, 3>::type zxyw, brga, pstq;
-    typename swizzler_wrapper<2, 0, 2, 0>::type zxzx, brbr, psps;
-    typename swizzler_wrapper<2, 0, 2, 1>::type zxzy, brbg, pspt;
-    typename swizzler_wrapper<2, 0, 2, 2>::type zxzz, brbb, pspp;
-    typename swizzler_wrapper<2, 0, 2, 3>::type zxzw, brba, pspq;
-    typename swizzler_wrapper<2, 0, 3, 0>::type zxwx, brar, psqs;
-    typename swizzler_wrapper<2, 0, 3, 1>::type zxwy, brag, psqt;
-    typename swizzler_wrapper<2, 0, 3, 2>::type zxwz, brab, psqp;
-    typename swizzler_wrapper<2, 0, 3, 3>::type zxww, braa, psqq;
-    typename swizzler_wrapper<2, 1, 0, 0>::type zyxx, bgrr, ptss;
-    typename swizzler_wrapper<2, 1, 0, 1>::type zyxy, bgrg, ptst;
-    typename swizzler_wrapper<2, 1, 0, 2>::type zyxz, bgrb, ptsp;
-    typename swizzler_wrapper<2, 1, 0, 3>::type zyxw, bgra, ptsq;
-    typename swizzler_wrapper<2, 1, 1, 0>::type zyyx, bggr, ptts;
-    typename swizzler_wrapper<2, 1, 1, 1>::type zyyy, bggg, pttt;
-    typename swizzler_wrapper<2, 1, 1, 2>::type zyyz, bggb, pttp;
-    typename swizzler_wrapper<2, 1, 1, 3>::type zyyw, bgga, pttq;
-    typename swizzler_wrapper<2, 1, 2, 0>::type zyzx, bgbr, ptps;
-    typename swizzler_wrapper<2, 1, 2, 1>::type zyzy, bgbg, ptpt;
-    typename swizzler_wrapper<2, 1, 2, 2>::type zyzz, bgbb, ptpp;
-    typename swizzler_wrapper<2, 1, 2, 3>::type zyzw, bgba, ptpq;
-    typename swizzler_wrapper<2, 1, 3, 0>::type zywx, bgar, ptqs;
-    typename swizzler_wrapper<2, 1, 3, 1>::type zywy, bgag, ptqt;
-    typename swizzler_wrapper<2, 1, 3, 2>::type zywz, bgab, ptqp;
-    typename swizzler_wrapper<2, 1, 3, 3>::type zyww, bgaa, ptqq;
-    typename swizzler_wrapper<2, 2, 0, 0>::type zzxx, bbrr, ppss;
-    typename swizzler_wrapper<2, 2, 0, 1>::type zzxy, bbrg, ppst;
-    typename swizzler_wrapper<2, 2, 0, 2>::type zzxz, bbrb, ppsp;
-    typename swizzler_wrapper<2, 2, 0, 3>::type zzxw, bbra, ppsq;
-    typename swizzler_wrapper<2, 2, 1, 0>::type zzyx, bbgr, ppts;
-    typename swizzler_wrapper<2, 2, 1, 1>::type zzyy, bbgg, pptt;
-    typename swizzler_wrapper<2, 2, 1, 2>::type zzyz, bbgb, pptp;
-    typename swizzler_wrapper<2, 2, 1, 3>::type zzyw, bbga, pptq;
-    typename swizzler_wrapper<2, 2, 2, 0>::type zzzx, bbbr, ppps;
-    typename swizzler_wrapper<2, 2, 2, 1>::type zzzy, bbbg, pppt;
-    typename swizzler_wrapper<2, 2, 2, 2>::type zzzz, bbbb, pppp;
-    typename swizzler_wrapper<2, 2, 2, 3>::type zzzw, bbba, pppq;
-    typename swizzler_wrapper<2, 2, 3, 0>::type zzwx, bbar, ppqs;
-    typename swizzler_wrapper<2, 2, 3, 1>::type zzwy, bbag, ppqt;
-    typename swizzler_wrapper<2, 2, 3, 2>::type zzwz, bbab, ppqp;
-    typename swizzler_wrapper<2, 2, 3, 3>::type zzww, bbaa, ppqq;
-    typename swizzler_wrapper<2, 3, 0, 0>::type zwxx, barr, pqss;
-    typename swizzler_wrapper<2, 3, 0, 1>::type zwxy, barg, pqst;
-    typename swizzler_wrapper<2, 3, 0, 2>::type zwxz, barb, pqsp;
-    typename swizzler_wrapper<2, 3, 0, 3>::type zwxw, bara, pqsq;
-    typename swizzler_wrapper<2, 3, 1, 0>::type zwyx, bagr, pqts;
-    typename swizzler_wrapper<2, 3, 1, 1>::type zwyy, bagg, pqtt;
-    typename swizzler_wrapper<2, 3, 1, 2>::type zwyz, bagb, pqtp;
-    typename swizzler_wrapper<2, 3, 1, 3>::type zwyw, baga, pqtq;
-    typename swizzler_wrapper<2, 3, 2, 0>::type zwzx, babr, pqps;
-    typename swizzler_wrapper<2, 3, 2, 1>::type zwzy, babg, pqpt;
-    typename swizzler_wrapper<2, 3, 2, 2>::type zwzz, babb, pqpp;
-    typename swizzler_wrapper<2, 3, 2, 3>::type zwzw, baba, pqpq;
-    typename swizzler_wrapper<2, 3, 3, 0>::type zwwx, baar, pqqs;
-    typename swizzler_wrapper<2, 3, 3, 1>::type zwwy, baag, pqqt;
-    typename swizzler_wrapper<2, 3, 3, 2>::type zwwz, baab, pqqp;
-    typename swizzler_wrapper<2, 3, 3, 3>::type zwww, baaa, pqqq;
-    typename swizzler_wrapper<3, 0, 0, 0>::type wxxx, arrr, qsss;
-    typename swizzler_wrapper<3, 0, 0, 1>::type wxxy, arrg, qsst;
-    typename swizzler_wrapper<3, 0, 0, 2>::type wxxz, arrb, qssp;
-    typename swizzler_wrapper<3, 0, 0, 3>::type wxxw, arra, qssq;
-    typename swizzler_wrapper<3, 0, 1, 0>::type wxyx, argr, qsts;
-    typename swizzler_wrapper<3, 0, 1, 1>::type wxyy, argg, qstt;
-    typename swizzler_wrapper<3, 0, 1, 2>::type wxyz, argb, qstp;
-    typename swizzler_wrapper<3, 0, 1, 3>::type wxyw, arga, qstq;
-    typename swizzler_wrapper<3, 0, 2, 0>::type wxzx, arbr, qsps;
-    typename swizzler_wrapper<3, 0, 2, 1>::type wxzy, arbg, qspt;
-    typename swizzler_wrapper<3, 0, 2, 2>::type wxzz, arbb, qspp;
-    typename swizzler_wrapper<3, 0, 2, 3>::type wxzw, arba, qspq;
-    typename swizzler_wrapper<3, 0, 3, 0>::type wxwx, arar, qsqs;
-    typename swizzler_wrapper<3, 0, 3, 1>::type wxwy, arag, qsqt;
-    typename swizzler_wrapper<3, 0, 3, 2>::type wxwz, arab, qsqp;
-    typename swizzler_wrapper<3, 0, 3, 3>::type wxww, araa, qsqq;
-    typename swizzler_wrapper<3, 1, 0, 0>::type wyxx, agrr, qtss;
-    typename swizzler_wrapper<3, 1, 0, 1>::type wyxy, agrg, qtst;
-    typename swizzler_wrapper<3, 1, 0, 2>::type wyxz, agrb, qtsp;
-    typename swizzler_wrapper<3, 1, 0, 3>::type wyxw, agra, qtsq;
-    typename swizzler_wrapper<3, 1, 1, 0>::type wyyx, aggr, qtts;
-    typename swizzler_wrapper<3, 1, 1, 1>::type wyyy, aggg, qttt;
-    typename swizzler_wrapper<3, 1, 1, 2>::type wyyz, aggb, qttp;
-    typename swizzler_wrapper<3, 1, 1, 3>::type wyyw, agga, qttq;
-    typename swizzler_wrapper<3, 1, 2, 0>::type wyzx, agbr, qtps;
-    typename swizzler_wrapper<3, 1, 2, 1>::type wyzy, agbg, qtpt;
-    typename swizzler_wrapper<3, 1, 2, 2>::type wyzz, agbb, qtpp;
-    typename swizzler_wrapper<3, 1, 2, 3>::type wyzw, agba, qtpq;
-    typename swizzler_wrapper<3, 1, 3, 0>::type wywx, agar, qtqs;
-    typename swizzler_wrapper<3, 1, 3, 1>::type wywy, agag, qtqt;
-    typename swizzler_wrapper<3, 1, 3, 2>::type wywz, agab, qtqp;
-    typename swizzler_wrapper<3, 1, 3, 3>::type wyww, agaa, qtqq;
-    typename swizzler_wrapper<3, 2, 0, 0>::type wzxx, abrr, qpss;
-    typename swizzler_wrapper<3, 2, 0, 1>::type wzxy, abrg, qpst;
-    typename swizzler_wrapper<3, 2, 0, 2>::type wzxz, abrb, qpsp;
-    typename swizzler_wrapper<3, 2, 0, 3>::type wzxw, abra, qpsq;
-    typename swizzler_wrapper<3, 2, 1, 0>::type wzyx, abgr, qpts;
-    typename swizzler_wrapper<3, 2, 1, 1>::type wzyy, abgg, qptt;
-    typename swizzler_wrapper<3, 2, 1, 2>::type wzyz, abgb, qptp;
-    typename swizzler_wrapper<3, 2, 1, 3>::type wzyw, abga, qptq;
-    typename swizzler_wrapper<3, 2, 2, 0>::type wzzx, abbr, qpps;
-    typename swizzler_wrapper<3, 2, 2, 1>::type wzzy, abbg, qppt;
-    typename swizzler_wrapper<3, 2, 2, 2>::type wzzz, abbb, qppp;
-    typename swizzler_wrapper<3, 2, 2, 3>::type wzzw, abba, qppq;
-    typename swizzler_wrapper<3, 2, 3, 0>::type wzwx, abar, qpqs;
-    typename swizzler_wrapper<3, 2, 3, 1>::type wzwy, abag, qpqt;
-    typename swizzler_wrapper<3, 2, 3, 2>::type wzwz, abab, qpqp;
-    typename swizzler_wrapper<3, 2, 3, 3>::type wzww, abaa, qpqq;
-    typename swizzler_wrapper<3, 3, 0, 0>::type wwxx, aarr, qqss;
-    typename swizzler_wrapper<3, 3, 0, 1>::type wwxy, aarg, qqst;
-    typename swizzler_wrapper<3, 3, 0, 2>::type wwxz, aarb, qqsp;
-    typename swizzler_wrapper<3, 3, 0, 3>::type wwxw, aara, qqsq;
-    typename swizzler_wrapper<3, 3, 1, 0>::type wwyx, aagr, qqts;
-    typename swizzler_wrapper<3, 3, 1, 1>::type wwyy, aagg, qqtt;
-    typename swizzler_wrapper<3, 3, 1, 2>::type wwyz, aagb, qqtp;
-    typename swizzler_wrapper<3, 3, 1, 3>::type wwyw, aaga, qqtq;
-    typename swizzler_wrapper<3, 3, 2, 0>::type wwzx, aabr, qqps;
-    typename swizzler_wrapper<3, 3, 2, 1>::type wwzy, aabg, qqpt;
-    typename swizzler_wrapper<3, 3, 2, 2>::type wwzz, aabb, qqpp;
-    typename swizzler_wrapper<3, 3, 2, 3>::type wwzw, aaba, qqpq;
-    typename swizzler_wrapper<3, 3, 3, 0>::type wwwx, aaar, qqqs;
-    typename swizzler_wrapper<3, 3, 3, 1>::type wwwy, aaag, qqqt;
-    typename swizzler_wrapper<3, 3, 3, 2>::type wwwz, aaab, qqqp;
-    typename swizzler_wrapper<3, 3, 3, 3>::type wwww, aaaa, qqqq;
   };
-};
+
+  template <typename T, size_t N>
+  inline vector<T, N> sin(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::sin(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> cos(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::cos(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> tan(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::tan(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> asin(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::asin(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> acos(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::acos(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> atan(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::atan(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> pow(const vector<T, N> &x, const vector<T, N> &y) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::pow(x[i], y[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> exp(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::exp(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> log(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::log(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> exp2(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::exp2(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> log2(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::log2(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> sqrt(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::sqrt(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> rsqrt(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return T(1) / std::sqrt(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> abs(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::abs(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> floor(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::floor(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> trunc(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::trunc(v[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> ceil(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return std::ceil(v[i]); });
+  }
+
+  template <typename T, size_t N, typename CharT = char>
+  std::basic_string<CharT> fmt(const vector<T, N> &v) {
+    std::basic_string<CharT> out = "(" + std::to_string(v[0]);
+    for (size_t i = 1; i < N; ++i) {
+      out += ',' + std::to_string(v[i]);
+    }
+    return out + ")";
+  }
 
 } // namespace detail
 
-template <typename T, size_t... Ns>
-struct vector
-    : public detail::vector_base_selector<T, Ns...>::base_type,
-      public detail::builtin_func_lib<vector, T, Ns...>,
-      public std::conditional<sizeof...(Ns) != 1,
-                              detail::binary_vec_ops<vector<T, Ns...>, T>,
-                              detail::nothing>::type {
-  static constexpr auto num_components = sizeof...(Ns);
-  using scalar_type = T;
-  using vector_type = vector<T, Ns...>;
-  using base_type = typename detail::vector_base_selector<T, Ns...>::base_type;
-  using decay_type = typename std::conditional<num_components == 1, scalar_type,
-                                               vector_type>::type;
+template <typename T, size_t N>
+struct vector : public ::vml::detail::vector_base<T, N> {
+  typedef T scalar_type;
+  typedef vector<T, N> vector_type;
+  typedef typename ::vml::detail::vector_base<T, N> base_type;
+  typedef typename std::conditional<N == 1, scalar_type, vector_type>::type
+      decay_type;
+
   using base_type::data;
 
-  vector() { ((data[Ns] = 0), ...); }
-  vector(typename std::conditional<num_components == 1, scalar_type,
-                                   detail::nothing>::type s) {
+  vector() { std::fill(data, data + N, scalar_type(0)); };
+  vector(const scalar_type *swizzle_data) {
+    std::copy(swizzle_data, swizzle_data + N, data);
+  }
+  vector(typename std::conditional<N == 1, scalar_type,
+                                   ::vml::detail::nothing>::type s) {
     data[0] = s;
   }
-  vector(typename std::conditional<num_components != 1, scalar_type,
-                                   detail::nothing>::type s) {
-    ((data[Ns] = s), ...);
+  vector(typename std::conditional<N != 1, scalar_type,
+                                   ::vml::detail::nothing>::type s) {
+    std::fill(data, data + N, s);
   }
   template <typename A0, typename... Args,
-            class = typename std::enable_if<
-                ((sizeof...(Args) >= 1) ||
-                 ((sizeof...(Args) == 0) && !std::is_scalar<A0>::value))>::type>
+            class = typename std::enable_if<(sizeof...(Args) >= 1)>::type>
   explicit vector(A0 &&a0, Args &&... args) {
-    static_assert((sizeof...(args) < num_components), "too many arguments");
-    size_t i = 0;
-    construct_at_index(i, detail::decay(std::forward<A0>(a0)));
-    (construct_at_index(i, detail::decay(std::forward<Args>(args))), ...);
+    __construct<0>(::vml::detail::decay(std::forward<A0>(a0)),
+                   ::vml::detail::decay(std::forward<Args>(args))...);
   }
 
-  const scalar_type &operator[](size_t i) const { return data[i]; }
   scalar_type &operator[](size_t i) { return data[i]; }
+  const scalar_type &operator[](size_t i) const { return data[i]; }
   decay_type decay() const { return static_cast<const decay_type &>(*this); }
-  operator typename std::conditional<num_components == 1, scalar_type,
-                                     detail::nothing>::type() const {
+  operator typename std::conditional<N == 1, scalar_type,
+                                     ::vml::detail::nothing>::type() const {
     return data[0];
   }
 
-  using self_type = vector_type;
-
-  DEF_OP_UNARY_SCALAR(+=, Ns);
-  DEF_OP_UNARY_SCALAR(-=, Ns);
-  DEF_OP_UNARY_SCALAR(*=, Ns);
-  DEF_OP_UNARY_SCALAR(/=, Ns);
-  DEF_OP_UNARY_VECTOR(+=, Ns);
-  DEF_OP_UNARY_VECTOR(-=, Ns);
-  DEF_OP_UNARY_VECTOR(*=, Ns);
-  DEF_OP_UNARY_VECTOR(/=, Ns);
-  self_type operator-() const { return self_type((-data[Ns])...); }
-
-#ifdef VML_OPENACC
-  void todev() {
-#pragma acc enter data copyin(this [0:1], data)
+  vector_type &operator+=(scalar_type s) {
+    ::vml::detail::static_for<0, N>([&](size_t i) { data[i] += s; });
+    return *this;
   }
-  void fromdev() {
-#pragma acc exit data delete (data, this [0:1])
+  vector_type &operator-=(scalar_type s) {
+    ::vml::detail::static_for<0, N>([&](size_t i) { data[i] -= s; });
+    return *this;
   }
-  void updatehost() {
-#pragma acc update self(data)
+  vector_type &operator*=(scalar_type s) {
+    ::vml::detail::static_for<0, N>([&](size_t i) { data[i] *= s; });
+    return *this;
   }
-  void updatedev() {
-#pragma acc update device(data)
+  vector_type &operator/=(scalar_type s) {
+    ::vml::detail::static_for<0, N>([&](size_t i) { data[i] /= s; });
+    return *this;
   }
-#endif
-
-private:
-  void construct_at_index(size_t &i, scalar_type arg) { data[i++] = arg; }
-  template <typename Other, size_t... Other_Ns>
-  void construct_at_index(size_t &i, const vector<Other, Other_Ns...> &arg) {
-    constexpr auto other_num = vector<Other, Other_Ns...>::num_components;
-    constexpr auto count =
-        num_components <= other_num ? num_components : other_num;
-    detail::static_for<0, count>()([&](size_t j) { data[i++] = arg.data[j]; });
+  vector_type &operator+=(vector_type s) {
+    ::vml::detail::static_for<0, N>([&](size_t i) { data[i] += s[i]; });
+    return *this;
   }
-};
-
-namespace traits {
-template <class vector_type_1, class scalar_type_1, size_t size_1,
-          class vector_type_2, class scalar_type_2, size_t size_2>
-struct common_vec_type_impl {
-  using scalar_common_type =
-      typename std::common_type<scalar_type_1, scalar_type_2>::type;
-  static_assert(std::is_same<scalar_common_type, scalar_type_1>::value ||
-                    std::is_same<scalar_common_type, scalar_type_2>::value,
-                "invalid vector common scalar type");
-  static_assert(size_1 == size_2 || size_1 == 1 || size_2 == 1,
-                "vector sizes must be equal or at least one needs to be a "
-                "promoted scalar");
-
-  using type = typename std::conditional<
-      size_1 == size_2,
-      typename std::conditional<
-          std::is_same<scalar_common_type, scalar_type_1>::value, vector_type_1,
-          vector_type_2>::type,
-      typename std::conditional<size_1 == 1, vector_type_2,
-                                vector_type_1>::type>::type;
-};
-template <class V1, class V2>
-struct common_vec_type
-    : common_vec_type_impl<V1, typename V1::scalar_type, V1::num_components, V2,
-                           typename V2::scalar_type, V2::num_components> {};
-template <class T, class... Ts>
-struct promote_to_vec : common_vec_type<typename promote_to_vec<T>::type,
-                                        typename promote_to_vec<Ts...>::type> {
-};
-template <class T> struct promote_to_vec_impl {};
-template <class T>
-struct promote_to_vec<T>
-    : promote_to_vec_impl<typename ::vml::detail::remove_cvref<T>::type> {};
-
-template <typename T, size_t... Ns>
-struct promote_to_vec_impl<::vml::vector<T, Ns...>> {
-  using type = ::vml::vector<T, Ns...>;
-};
-template <typename vector_type, typename T, size_t N, size_t... indicies>
-struct promote_to_vec_impl<
-    ::vml::detail::swizzler<vector_type, T, N, indicies...>> {
-  using type = vector_type;
-};
-template <typename T> struct scalar_to_vector {
-  using type = ::vml::vector<T, 0>;
-};
-template <> struct promote_to_vec_impl<bool> : scalar_to_vector<bool> {};
-template <> struct promote_to_vec_impl<int> : scalar_to_vector<int> {};
-template <>
-struct promote_to_vec_impl<unsigned> : scalar_to_vector<unsigned> {};
-template <>
-struct promote_to_vec_impl<long int> : scalar_to_vector<long int> {};
-template <> struct promote_to_vec_impl<float> : scalar_to_vector<float> {};
-template <> struct promote_to_vec_impl<double> : scalar_to_vector<double> {};
-
-constexpr int vec_traits_test() {
-  using vec1 = ::vml::vector<float, 0>;
-  using dvec1 = ::vml::vector<double, 0>;
-  using vec3 = ::vml::vector<float, 0, 1, 2>;
-
-  static_assert(std::is_convertible<vec1, float>::value, "mismatch");
-
-  static_assert(std::is_same<promote_to_vec<float>::type, vec1>::value,
-                "mismatch");
-  static_assert(std::is_same<promote_to_vec<vec3>::type, vec3>::value,
-                "mismatch");
-  static_assert(
-      std::is_same<promote_to_vec<decltype(vec3().xyz)>::type, vec3>::value,
-      "mismatch");
-
-  static_assert(std::is_same<promote_to_vec<float, float>::type, vec1>::value,
-                "mismatch");
-  static_assert(std::is_same<promote_to_vec<float, double>::type, dvec1>::value,
-                "mismatch");
-  static_assert(std::is_same<promote_to_vec<vec3, float>::type, vec3>::value,
-                "mismatch");
-  static_assert(std::is_same<promote_to_vec<double, vec3>::type, vec3>::value,
-                "mismatch");
-  static_assert(
-      std::is_same<promote_to_vec<vec3, float, double>::type, vec3>::value,
-      "mismatch");
-
-  return 0;
-}
-
-static constexpr auto vec_traits_unit_test = vec_traits_test();
-
-} // namespace traits
-
-template <size_t...> struct indicies_pack;
-template <typename, template <typename, size_t...> class vector_type,
-          typename...>
-struct matrix;
-
-template <typename scalar_type,
-          template <typename, size_t...> class vector_type, size_t... Columns,
-          size_t... Rows>
-struct matrix<scalar_type, vector_type, indicies_pack<Columns...>,
-              indicies_pack<Rows...>>
-    : public detail::binary_vec_ops<
-          matrix<scalar_type, vector_type, indicies_pack<Columns...>,
-                 indicies_pack<Rows...>>,
-          scalar_type> {
-  static constexpr auto N = sizeof...(Columns);
-  static constexpr auto M = sizeof...(Rows);
-  using column_type = vector_type<scalar_type, Columns...>;
-  using row_type = vector_type<scalar_type, Rows...>;
-
-  matrix() = default;
-
-  template <typename S,
-            class = typename std::enable_if<
-                std::is_same<S, scalar_type>::vlaue && (N == M)>::type>
-  explicit matrix(S s) {
-    ((data[Rows][Rows] = s), ...);
+  vector_type &operator-=(vector_type s) {
+    ::vml::detail::static_for<0, N>([&](size_t i) { data[i] -= s[i]; });
+    return *this;
   }
-
-  matrix(const matrix &other) { ((data[Rows] = other.data[Rows]), ...); }
-  template <size_t... OtherColumns, size_t... OtherRows>
-  matrix(const matrix<scalar_type, vector_type, indicies_pack<OtherColumns...>,
-                      indicies_pack<OtherRows...>> &other) {
-    static constexpr auto min_m = sizeof...(OtherColumns) > sizeof...(Columns)
-                                      ? sizeof...(Columns)
-                                      : sizeof...(OtherColumns);
-    static constexpr auto min_n = sizeof...(OtherRows) > sizeof...(Rows)
-                                      ? sizeof...(Rows)
-                                      : sizeof...(OtherRows);
-    detail::static_for<0, min_n>()([&](size_t row) -> void {
-      detail::static_for<0, min_m>()(
-          [&](size_t col) -> void { data[row][col] = other[row][col]; });
-    });
-    static constexpr auto min_inner = min_n > min_m ? min_m : min_n;
-    static constexpr auto min_outer = N > M ? M : N;
-    detail::static_for<min_inner, min_outer>()(
-        [&](size_t i) -> void { data[i][i] = scalar_type(1); });
+  vector_type &operator*=(vector_type s) {
+    ::vml::detail::static_for<0, N>([&](size_t i) { data[i] *= s[i]; });
+    return *this;
   }
-
-  template <typename... Args,
-            class = typename std::enable_if<(sizeof...(Args) >= 2)>::type>
-  explicit matrix(Args &&... args) {
-    static_assert((sizeof...(args) <= N * M), "too many arguments");
-    size_t i = 0;
-    (construct_at_index(i, detail::decay(std::forward<Args>(args))), ...);
-  }
-
-  matrix &operator=(const matrix &other) {
-    ((data[Rows] = other.data[Rows]), ...);
+  vector_type &operator/=(vector_type s) {
+    ::vml::detail::static_for<0, N>([&](size_t i) { data[i] /= s[i]; });
     return *this;
   }
 
-  column_type &operator[](size_t i) { return data[i]; }
-  const column_type &operator[](size_t i) const { return data[i]; }
-
-  using self_type = matrix;
-
-  DEF_OP_UNARY_SCALAR(+=, Rows);
-  DEF_OP_UNARY_SCALAR(-=, Rows);
-  DEF_OP_UNARY_SCALAR(*=, Rows);
-  DEF_OP_UNARY_SCALAR(/=, Rows);
-  DEF_OP_UNARY_VECTOR(+=, Rows);
-  DEF_OP_UNARY_VECTOR(-=, Rows);
-  DEF_OP_UNARY_VECTOR(/=, Rows);
-  self_type operator-() const { return self_type((-data[Rows])...); }
-
-  friend column_type operator*(const matrix &m, const row_type &v) {
-    return mul(m, v);
+  friend vector_type operator+(const vector_type &a, const scalar_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a[i] + b; });
   }
-  friend row_type operator*(const column_type &v, const matrix &m) {
-    return mul(v, m);
+  friend vector_type operator-(const vector_type &a, const scalar_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a[i] - b; });
   }
-
-  matrix &operator*=(const matrix &m) { return *this = mul(*this, m); }
-  static column_type mul(const matrix &m, const row_type &v) {
-    column_type out;
-    ((out[Rows] = v.FUNC(dot)(v, m.row(Rows))), ...);
-    return out;
+  friend vector_type operator*(const vector_type &a, const scalar_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a[i] * b; });
   }
-  static row_type mul(const column_type &v, const matrix &m) {
-    row_type out;
-    ((out[Columns] = v.FUNC(dot)(v, m.column(Columns))), ...);
-    return out;
+  friend vector_type operator/(const vector_type &a, const scalar_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a[i] / b; });
   }
-
-  template <size_t... OtherRows>
-  static matrix<scalar_type, vector_type, indicies_pack<Columns...>,
-                indicies_pack<OtherRows...>>
-  mul(const matrix &m1,
-      const matrix<scalar_type, vector_type, indicies_pack<Columns...>,
-                   indicies_pack<OtherRows...>> &m2) {
-    matrix<scalar_type, vector_type, indicies_pack<Columns...>,
-           indicies_pack<OtherRows...>>
-        out;
-    ((out[Columns] = m1 * m2.column(Columns)), ...);
-    return out;
+  friend vector_type operator+(const scalar_type &a, const vector_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a + b[i]; });
   }
-
-  const column_type &column(size_t i) const { return data[i]; }
-  row_type row(size_t i) const {
-    row_type out;
-    ((out[Rows] = data[Rows][i]), ...);
-    return out;
+  friend vector_type operator-(const scalar_type &a, const vector_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a - b[i]; });
+  }
+  friend vector_type operator*(const scalar_type &a, const vector_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a * b[i]; });
+  }
+  friend vector_type operator/(const scalar_type &a, const vector_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a / b[i]; });
+  }
+  friend vector_type operator+(const vector_type &a, const vector_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a[i] + b[i]; });
+  }
+  friend vector_type operator-(const vector_type &a, const vector_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a[i] - b[i]; });
+  }
+  friend vector_type operator*(const vector_type &a, const vector_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a[i] * b[i]; });
+  }
+  friend vector_type operator/(const vector_type &a, const vector_type &b) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return a[i] / b[i]; });
   }
 
 private:
-  void construct_at_index(size_t &i, scalar_type arg) {
-    data[i / N][i % N] = arg;
-    i++;
+  template <size_t I>
+  typename std::enable_if<(I < N), void>::type __construct() {
+    std::fill(data + I, data + N, scalar_type(0));
   }
-  template <typename Other, size_t... Other_Ns>
-  void construct_at_index(size_t &i, vector_type<Other, Other_Ns...> &&arg) {
-    detail::static_for<0, sizeof...(Other_Ns)>()([&](size_t j) {
-      data[i / N][i % N] = arg[j];
-      i++;
-    });
+  template <size_t I>
+  typename std::enable_if<(I >= N), void>::type __construct() {}
+  template <size_t I> void __construct(scalar_type arg) {
+    data[I] = arg;
+    __construct<I + 1>();
   }
-  column_type data[M];
+  template <size_t I, typename TOther, size_t NOther>
+  void __construct(const vector<TOther, NOther> &arg) {
+    std::copy<scalar_type>(arg.data, arg.data + NOther, data + I);
+    __construct<I + NOther>();
+  }
+  template <size_t I, typename... Args>
+  void __construct(scalar_type arg, Args &&... args) {
+    data[I] = arg;
+    __construct<I + 1>(args...);
+  }
+  template <size_t I, typename TOther, size_t NOther, typename... Args>
+  void __construct(const vector<TOther, NOther> &arg, Args &&... args) {
+    std::copy<scalar_type>(arg.data, arg.data + NOther, data + I);
+    __construct<I + NOther>(args...);
+  }
 };
 
-MAKE_VML_FUNC(radians);
-MAKE_VML_FUNC(degrees);
-MAKE_VML_FUNC(sin);
-MAKE_VML_FUNC(cos);
-MAKE_VML_FUNC(tan);
-MAKE_VML_FUNC(asin);
-MAKE_VML_FUNC(acos);
-MAKE_VML_FUNC(atan);
+VML_FUNC(sin);
 
-MAKE_VML_FUNC(pow);
-MAKE_VML_FUNC(exp);
-MAKE_VML_FUNC(log);
-MAKE_VML_FUNC(exp2);
-MAKE_VML_FUNC(log2);
-MAKE_VML_FUNC(sqrt);
-MAKE_VML_FUNC(inversesqrt);
+VML_FUNC(fmt);
 
-MAKE_VML_FUNC(abs);
-MAKE_VML_FUNC(sign);
-MAKE_VML_FUNC(floor);
-MAKE_VML_FUNC(trunc);
-MAKE_VML_FUNC(ceil);
-MAKE_VML_FUNC(fract);
-MAKE_VML_FUNC(mod);
-MAKE_VML_FUNC(min);
-MAKE_VML_FUNC(max);
-MAKE_VML_FUNC(clamp);
-MAKE_VML_FUNC(mix);
-MAKE_VML_FUNC(step);
-MAKE_VML_FUNC(smoothstep);
+template <typename T> using tvec4 = ::vml::vector<T, 4>;
+template <typename T> using tvec3 = ::vml::vector<T, 3>;
+template <typename T> using tvec2 = ::vml::vector<T, 2>;
 
-MAKE_VML_FUNC(length);
-MAKE_VML_FUNC(distance);
-MAKE_VML_FUNC(normalize);
-MAKE_VML_FUNC(dot);
-MAKE_VML_FUNC(cross);
-MAKE_VML_FUNC(faceforward);
-MAKE_VML_FUNC(reflect);
-MAKE_VML_FUNC(refract);
-
-MAKE_VML_FUNC(less_than);
-MAKE_VML_FUNC(less_than_equal);
-MAKE_VML_FUNC(greater_than);
-MAKE_VML_FUNC(greater_than_equal);
-MAKE_VML_FUNC(equal);
-MAKE_VML_FUNC(not_equal);
-MAKE_VML_FUNC(any);
-MAKE_VML_FUNC(all);
-MAKE_VML_FUNC(_not);
-
-#ifdef VML_FMT
-template <typename T> std::string fmt(const T &s) { return std::to_string(s); }
-template <typename T, size_t... indicies>
-std::string fmt(const ::vml::vector<T, indicies...> &v) {
-  std::string out = "(";
-  ::vml::detail::static_for<0, ::vml::vector<T, indicies...>::num_components>()(
-      [&](size_t i) {
-        if (i == 0)
-          out += std::to_string(v[i]);
-        else
-          out += ',' + std::to_string(v[i]);
-      });
-  return out + ')';
-}
-template <typename T, size_t... Columns, size_t... Rows>
-std::string
-fmt(const ::vml::matrix<T, ::vml::vector, ::vml::indicies_pack<Columns...>,
-                        ::vml::indicies_pack<Rows...>> &m) {
-  std::string out = "[";
-  ::vml::detail::static_for<0, sizeof...(Rows)>()([&](size_t r) {
-    if (r != 0)
-      out += ',';
-    out += '[';
-    ::vml::detail::static_for<0, sizeof...(Columns)>()([&](size_t c) {
-      if (c == 0) {
-        out += std::to_string(m[r][c]);
-      } else {
-        out += ',' + std::to_string(m[r][c]);
-      }
-    });
-    out += ']';
-  });
-  return out + ']';
-}
-
-#ifdef VML_OSTREAM
-template <typename T, size_t... indicies>
-std::ostream &operator<<(std::ostream &out,
-                         const ::vml::vector<T, indicies...> &v) {
-  return out << ::vml::fmt(v);
-}
-template <typename T, size_t... Columns, size_t... Rows>
-std::ostream &operator<<(
-    std::ostream &out,
-    const ::vml::matrix<T, ::vml::vector, ::vml::indicies_pack<Columns...>,
-                        ::vml::indicies_pack<Rows...>> &v) {
-  return out << ::vml::fmt(v);
-}
-#endif // VML_OSTREAM
-
-#endif // VML_FMT
-
-using _01 = ::vml::indicies_pack<0, 1>;
-using _012 = ::vml::indicies_pack<0, 1, 2>;
-using _0123 = ::vml::indicies_pack<0, 1, 2, 3>;
-template <typename T>
-using tmat4x4 = ::vml::matrix<T, ::vml::vector, _0123, _0123>;
-template <typename T>
-using tmat4 = ::vml::matrix<T, ::vml::vector, _0123, _0123>;
-template <typename T>
-using tmat4x3 = ::vml::matrix<T, ::vml::vector, _0123, _012>;
-template <typename T>
-using tmat4x2 = ::vml::matrix<T, ::vml::vector, _0123, _01>;
-template <typename T>
-using tmat3x4 = ::vml::matrix<T, ::vml::vector, _012, _0123>;
-template <typename T>
-using tmat3x3 = ::vml::matrix<T, ::vml::vector, _012, _012>;
-template <typename T> using tmat3 = ::vml::matrix<T, ::vml::vector, _012, _012>;
-template <typename T>
-using tmat3x2 = ::vml::matrix<T, ::vml::vector, _012, _01>;
-template <typename T>
-using tmat2x4 = ::vml::matrix<T, ::vml::vector, _01, _0123>;
-template <typename T>
-using tmat2x3 = ::vml::matrix<T, ::vml::vector, _01, _012>;
-template <typename T> using tmat2x2 = ::vml::matrix<T, ::vml::vector, _01, _01>;
-template <typename T> using tmat2 = ::vml::matrix<T, ::vml::vector, _01, _01>;
-
-typedef tmat4x4<float> mat4x4;
-typedef tmat4<float> mat4;
-typedef tmat4x3<float> mat4x3;
-typedef tmat4x2<float> mat4x2;
-typedef tmat3x4<float> mat3x4;
-typedef tmat3x3<float> mat3x3;
-typedef tmat3<float> mat3;
-typedef tmat3x2<float> mat3x2;
-typedef tmat2x4<float> mat2x4;
-typedef tmat2x3<float> mat2x3;
-typedef tmat2x2<float> mat2x2;
-typedef tmat2<float> mat2;
-
-template <typename T> using tvec4 = ::vml::vector<T, 0, 1, 2, 3>;
-template <typename T> using tvec3 = ::vml::vector<T, 0, 1, 2>;
-template <typename T> using tvec2 = ::vml::vector<T, 0, 1>;
-
-typedef tvec4<float> vec4;
-typedef tvec3<float> vec3;
-typedef tvec2<float> vec2;
+typedef tvec4<float> fvec4;
+typedef tvec3<float> fvec3;
+typedef tvec2<float> fvec2;
 typedef tvec4<bool> bvec4;
 typedef tvec3<bool> bvec3;
 typedef tvec2<bool> bvec2;
@@ -1466,44 +895,5 @@ typedef tvec3<unsigned> uvec3;
 typedef tvec2<unsigned> uvec2;
 
 } // namespace vml
-
-#ifdef VML_FMTLIB
-#include "fmt/format.h"
-
-template <typename scalar_type>
-struct fmt::formatter<::vml::vector<scalar_type, 0>> {
-  constexpr auto parse(format_parse_context &ctx) { return ctx.begin(); }
-  template <typename FormatContext>
-  auto format(const ::vml::vector<scalar_type, 0> v, FormatContext &ctx) {
-    return format_to(ctx.out(), "({})", v.data[0]);
-  }
-};
-template <typename scalar_type>
-struct fmt::formatter<::vml::vector<scalar_type, 1>> {
-  constexpr auto parse(format_parse_context &ctx) { return ctx.begin(); }
-  template <typename FormatContext>
-  auto format(const ::vml::vector<scalar_type, 1> v, FormatContext &ctx) {
-    return format_to(ctx.out(), "({}, {})", v.data[0], v.data[1]);
-  }
-};
-template <typename scalar_type>
-struct fmt::formatter<::vml::vector<scalar_type, 2>> {
-  constexpr auto parse(format_parse_context &ctx) { return ctx.begin(); }
-  template <typename FormatContext>
-  auto format(const ::vml::vector<scalar_type, 2> v, FormatContext &ctx) {
-    return format_to(ctx.out(), "({}, {}, {})", v.data[0], v.data[1],
-                     v.data[2]);
-  }
-};
-template <typename scalar_type>
-struct fmt::formatter<::vml::vector<scalar_type, 3>> {
-  constexpr auto parse(format_parse_context &ctx) { return ctx.begin(); }
-  template <typename FormatContext>
-  auto format(const ::vml::vector<scalar_type, 3> v, FormatContext &ctx) {
-    return format_to(ctx.out(), "({}, {}, {}, {})", v.data[0], v.data[1],
-                     v.data[2], v.data[3]);
-  }
-};
-#endif // VML_FMTLIB
 
 #endif // VML_HPP_
