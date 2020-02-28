@@ -19,6 +19,7 @@
 
 namespace vml {
 template <typename T, size_t N> struct vector;
+template <typename T, size_t M, size_t N> struct matrix;
 namespace detail {
   struct nothing {};
 
@@ -35,7 +36,7 @@ namespace detail {
   template <typename T, size_t N, class Func>
   inline constexpr vector<T, N> static_constructor(Func &&f) {
     vector<T, N> tmp;
-    return static_constructor<0, T, N>(tmp, f);
+    return static_constructor<0, T, N>(tmp, std::forward<Func>(f));
   }
   template <size_t I, typename T, size_t N, class Func>
   inline constexpr typename std::enable_if<I != N, vector<T, N>>::type
@@ -46,6 +47,23 @@ namespace detail {
   template <size_t I, typename T, size_t N, class Func>
   inline constexpr typename std::enable_if<I == N, vector<T, N>>::type
   static_constructor(vector<T, N> &v, Func &&) {
+    return v;
+  }
+
+  template <typename T, size_t M, size_t N, class Func>
+  inline constexpr matrix<T, M, N> static_constructor(Func &&f) {
+    matrix<T, M, N> tmp;
+    return static_constructor<0, T, M, N>(tmp, f);
+  }
+  template <size_t I, typename T, size_t M, size_t N, class Func>
+  inline constexpr typename std::enable_if<I != M, matrix<T, M, N>>::type
+  static_constructor(matrix<T, M, N> &v, Func &&f) {
+    v[I] = f(I);
+    return static_constructor<I + 1, T, N>(v, std::forward<Func>(f));
+  }
+  template <size_t I, typename T, size_t M, size_t N, class Func>
+  inline constexpr typename std::enable_if<I == M, matrix<T, M, N>>::type
+  static_constructor(matrix<T, M, N> &v, Func &&) {
     return v;
   }
 
@@ -696,6 +714,14 @@ namespace detail {
     return ::vml::detail::static_constructor<T, N>(
         [&](size_t i) { return std::abs(v[i]); });
   }
+  template <typename T> inline T sign(const T &t) {
+    return (T(0) < t) - (t < T(0));
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> sign(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return ::vml::detail::sign(v[i]); });
+  }
   template <typename T, size_t N>
   inline vector<T, N> floor(const vector<T, N> &v) {
     return ::vml::detail::static_constructor<T, N>(
@@ -711,6 +737,128 @@ namespace detail {
     return ::vml::detail::static_constructor<T, N>(
         [&](size_t i) { return std::ceil(v[i]); });
   }
+  template <typename T, size_t N>
+  inline vector<T, N> fract(const vector<T, N> &v) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return (v[i] - std::floor(v[i])); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> mod(const vector<T, N> &x, const T &y) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return x[i] - y * std::floor(x[i] / y); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> mod(const vector<T, N> &x, const vector<T, N> &y) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return x[i] - y[i] * std::floor(x[i] / y[i]); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> min(const vector<T, N> &x, const T &y) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return x[i] < y ? x[i] : y; });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> min(const vector<T, N> &x, const vector<T, N> &y) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return x[i] < y[i] ? x[i] : y[i]; });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> max(const vector<T, N> &x, const T &y) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return x[i] > y ? x[i] : y; });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> max(const vector<T, N> &x, const vector<T, N> &y) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return x[i] > y[i] ? x[i] : y[i]; });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> clamp(const vector<T, N> &x, const T &min_val,
+                            const T &max_val) {
+    return min(max(x, min_val), max_val);
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> clamp(const vector<T, N> &x, const vector<T, N> &min_val,
+                            const vector<T, N> &max_val) {
+    return min(max(x, min_val), max_val);
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> mix(const vector<T, N> &x, const vector<T, N> &y,
+                          const T &a) {
+    return x * (T(1) - a) + y * a;
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> mix(const vector<T, N> &x, const vector<T, N> &y,
+                          const vector<T, N> &a) {
+    return x * (T(1) - a) + y * a;
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> step(const T &edge, const vector<T, N> &x) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return x[i] < edge ? T(0) : T(1); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> step(const vector<T, N> &edge, const vector<T, N> &x) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return x[i] < edge[i] ? T(0) : T(1); });
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> smoothstep(const T &edge0, const T &edge1,
+                                 const vector<T, N> &x) {
+    auto t = clamp((x - edge0) / (edge1 - edge0), T(0), T(1));
+    return t * t * (T(3) - T(2) * t);
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> smoothstep(const vector<T, N> &edge0,
+                                 const vector<T, N> &edge1,
+                                 const vector<T, N> &x) {
+    auto t = clamp((x - edge0) / (edge1 - edge0), T(0), T(1));
+    return t * t * (T(3) - T(2) * t);
+  }
+
+  template <typename T, size_t N> inline T length(const vector<T, N> &v) {
+    return std::sqrt(dot(v, v));
+  }
+  template <typename T, size_t N>
+  inline T distance(const vector<T, N> &p0, const vector<T, N> &p1) {
+    return length(p0 - p1);
+  }
+  template <typename T, size_t N>
+  inline vector<T, N> normalize(const vector<T, N> &v) {
+    return v / length(v);
+  }
+  template <typename T, size_t N>
+  inline T dot(const vector<T, N> &a, const vector<T, N> &b) {
+    T sum = 0;
+    ::vml::detail::static_for<0, N>([&](size_t i) { sum += a[i] * b[i]; });
+    return sum;
+  }
+  template <typename T>
+  inline vector<T, 3> cross(const vector<T, 3> &a, const vector<T, 3> &b) {
+    return vector<T, 3>(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z,
+                        a.x * b.y - a.y * b.x);
+  }
+  template <typename T, size_t Size>
+  inline vector<T, Size> faceforward(const vector<T, Size> &N,
+                                     const vector<T, Size> &I,
+                                     const vector<T, Size> &Nref) {
+    return dot(Nref, I) < T(0) ? N : (-N);
+  }
+  template <typename T, size_t Size>
+  inline vector<T, Size> reflect(const vector<T, Size> &I,
+                                 const vector<T, Size> &N) {
+    return (I - T(2) * dot(I, N) * N);
+  }
+  template <typename T, size_t Size>
+  inline vector<T, Size> refract(const vector<T, Size> &I,
+                                 const vector<T, Size> &N, const T &eta) {
+    T k = T(1) - eta * eta * (T(1) - dot(N, I) * dot(N, I));
+    if (k < T(0)) {
+      return vector<T, Size>();
+    } else {
+      return eta * I - (eta * dot(N, I) + std::sqrt(k)) * N;
+    }
+  }
 
   template <typename T, size_t N, typename CharT = char>
   std::basic_string<CharT> fmt(const vector<T, N> &v) {
@@ -719,6 +867,22 @@ namespace detail {
       out += ',' + std::to_string(v[i]);
     }
     return out + ")";
+  }
+  template <typename T, size_t M, size_t N, typename CharT = char>
+  std::basic_string<CharT> fmt(const matrix<T, M, N> &m) {
+    std::basic_string<CharT> out = "[[" + std::to_string(m[0][0]);
+    for (size_t c = 1; c < N; ++c) {
+      out += ',' + std::to_string(m[0][c]);
+    }
+    out += ']';
+    for (size_t r = 1; r < M; ++r) {
+      out += ",[" + std::to_string(m[r][0]);
+      for (size_t c = 1; c < N; ++c) {
+        out += ',' + std::to_string(m[r][c]);
+      }
+      out += ']';
+    }
+    return out + "]";
   }
 
 } // namespace detail
@@ -746,7 +910,8 @@ struct vector : public ::vml::detail::vector_base<T, N> {
     std::fill(data, data + N, s);
   }
   template <typename A0, typename... Args,
-            class = typename std::enable_if<(sizeof...(Args) >= 1)>::type>
+            class = typename std::enable_if<(sizeof...(Args) >= 1 &&
+                                             sizeof...(Args) < N)>::type>
   explicit vector(A0 &&a0, Args &&... args) {
     __construct<0>(::vml::detail::decay(std::forward<A0>(a0)),
                    ::vml::detail::decay(std::forward<Args>(args))...);
@@ -760,6 +925,10 @@ struct vector : public ::vml::detail::vector_base<T, N> {
     return data[0];
   }
 
+  vector_type operator-() {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return -data[i]; });
+  }
   vector_type &operator+=(scalar_type s) {
     ::vml::detail::static_for<0, N>([&](size_t i) { data[i] += s; });
     return *this;
@@ -870,13 +1039,273 @@ private:
   }
 };
 
+template <typename T, size_t M, size_t N> struct matrix {
+  typedef T scalar_type;
+  typedef vector<T, N> vector_type;
+  typedef vector<T, M> row_type;
+  typedef vector<T, N> column_type;
+  matrix() = default;
+
+  template <typename S, typename = typename std::enable_if<
+                            std::is_convertible<S, T>::value && (N == M)>::type>
+  explicit matrix(S s) {
+    ::vml::detail::static_for<0, M>([&](size_t i) { data[i][i] = s; });
+  }
+  matrix(const matrix &other) {
+    ::vml::detail::static_for<0, M>([&](size_t i) { data[i] = other[i]; });
+  }
+  template <size_t OtherM, size_t OtherN>
+  matrix(const matrix<T, OtherM, OtherN> &other) {
+    static constexpr auto MinM = M > OtherM ? OtherM : M;
+    static constexpr auto MinN = N > OtherN ? OtherN : N;
+    static constexpr auto MinInner = MinN > MinM ? MinM : MinN;
+    static constexpr auto MinOuter = N > M ? M : N;
+    ::vml::detail::static_for<0, MinM>([&](size_t row) {
+      ::vml::detail::static_for<0, MinN>(
+          [&](size_t col) { data[row][col] = other[row][col]; });
+    });
+    ::vml::detail::static_for<MinInner, MinOuter>(
+        [&](size_t i) { data[i][i] = T(1); });
+  }
+  template <typename A0, typename... Args,
+            class = typename std::enable_if<(sizeof...(Args) >= 1 &&
+                                             sizeof...(Args) < N * M)>::type>
+  explicit matrix(A0 a0, Args &&... args) {
+    __construct<0>(::vml::detail::decay(std::forward<A0>(a0)),
+                   ::vml::detail::decay(std::forward<Args>(args))...);
+  }
+
+  matrix decay() const { return *this; }
+
+  row_type &operator[](size_t i) { return data[i]; }
+  const row_type &operator[](size_t i) const { return data[i]; }
+
+  column_type column(size_t i) const {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t j) { return data[j][i]; });
+  }
+  row_type row(size_t i) const { return data[i]; }
+
+  matrix operator-() {
+    return ::vml::detail::static_constructor<T, N, M>(
+        [&](size_t i) { return -data[i]; });
+  }
+  matrix &operator+=(scalar_type s) {
+    ::vml::detail::static_for<0, M>([&](size_t i) { data[i] += s; });
+    return *this;
+  }
+  matrix &operator-=(scalar_type s) {
+    ::vml::detail::static_for<0, M>([&](size_t i) { data[i] -= s; });
+    return *this;
+  }
+  matrix &operator*=(scalar_type s) {
+    ::vml::detail::static_for<0, M>([&](size_t i) { data[i] *= s; });
+    return *this;
+  }
+  matrix &operator/=(scalar_type s) {
+    ::vml::detail::static_for<0, M>([&](size_t i) { data[i] /= s; });
+    return *this;
+  }
+  matrix &operator+=(matrix s) {
+    ::vml::detail::static_for<0, M>([&](size_t i) { data[i] += s[i]; });
+    return *this;
+  }
+  matrix &operator-=(matrix s) {
+    ::vml::detail::static_for<0, M>([&](size_t i) { data[i] -= s[i]; });
+    return *this;
+  }
+  matrix &operator/=(matrix s) {
+    ::vml::detail::static_for<0, M>([&](size_t i) { data[i] /= s[i]; });
+    return *this;
+  }
+
+  friend matrix operator+(const matrix &a, const scalar_type &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a[i] + b; });
+  }
+  friend matrix operator-(const matrix &a, const scalar_type &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a[i] - b; });
+  }
+  friend matrix operator*(const matrix &a, const scalar_type &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a[i] * b; });
+  }
+  friend matrix operator/(const matrix &a, const scalar_type &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a[i] / b; });
+  }
+  friend matrix operator+(const scalar_type &a, const matrix &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a + b[i]; });
+  }
+  friend matrix operator-(const scalar_type &a, const matrix &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a - b[i]; });
+  }
+  friend matrix operator*(const scalar_type &a, const matrix &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a * b[i]; });
+  }
+  friend matrix operator/(const scalar_type &a, const matrix &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a / b[i]; });
+  }
+  friend matrix operator+(const matrix &a, const matrix &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a[i] + b[i]; });
+  }
+  friend matrix operator-(const matrix &a, const matrix &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a[i] - b[i]; });
+  }
+  friend matrix operator/(const matrix &a, const matrix &b) {
+    return ::vml::detail::static_constructor<T, M, N>(
+        [&](size_t i) { return a[i] / b[i]; });
+  }
+
+  friend column_type operator*(const matrix &m, const row_type &v) {
+    return mul(m, v);
+  }
+  friend row_type operator*(const column_type &v, const matrix &m) {
+    return mul(v, m);
+  }
+  matrix &operator*=(const matrix &m) { return *this = mul(*this, m); }
+  template <size_t OtherM>
+  friend matrix<T, OtherM, N> operator*(const matrix &m1,
+                                        const matrix<T, OtherM, N> &m2) {
+    return mul(m1, m2);
+  }
+
+  static column_type mul(const matrix &m, const row_type &v) {
+    return ::vml::detail::static_constructor<T, M>(
+        [&](size_t i) { return ::vml::detail::dot(v, m.row(i)); });
+  }
+  static row_type mul(const column_type &v, const matrix &m) {
+    return ::vml::detail::static_constructor<T, N>(
+        [&](size_t i) { return ::vml::detail::dot(v, m.column(i)); });
+  }
+  template <size_t OtherM>
+  static matrix<T, OtherM, N> mul(const matrix &m1,
+                                  const matrix<T, OtherM, N> &m2) {
+    matrix<T, OtherM, N> out;
+    ::vml::detail::static_for<0, N>([&](size_t i) { out[i] = m1.row(i) * m2; });
+    return out;
+  }
+
+  row_type data[M];
+
+private:
+  template <size_t I>
+  typename std::enable_if<(I < M * N), void>::type __construct() {}
+  template <size_t I>
+  typename std::enable_if<(I >= M * N), void>::type __construct() {}
+  template <size_t I> void __construct(scalar_type arg) {
+    data[I / N][I % N] = arg;
+    __construct<I + 1>();
+  }
+  template <size_t I, typename TOther, size_t NOther>
+  void __construct(const vector<TOther, NOther> &arg) {
+    ::vml::detail::static_for<0, NOther>(
+        [&](size_t i) { data[(I + i) / N][(I + i) % N] = arg[i]; });
+    __construct<I + NOther>();
+  }
+  template <size_t I, typename... Args>
+  void __construct(scalar_type arg, Args &&... args) {
+    data[I / N][I % N] = arg;
+    __construct<I + 1>(args...);
+  }
+  template <size_t I, typename TOther, size_t NOther, typename... Args>
+  void __construct(const vector<TOther, NOther> &arg, Args &&... args) {
+    ::vml::detail::static_for<0, NOther>(
+        [&](size_t i) { data[(I + i) / N][(I + i) % N] = arg[i]; });
+    __construct<I + NOther>(args...);
+  }
+};
+
 VML_FUNC(sin);
+VML_FUNC(cos);
+VML_FUNC(tan);
+VML_FUNC(asin);
+VML_FUNC(acos);
+VML_FUNC(atan);
+VML_FUNC(pow);
+VML_FUNC(exp);
+VML_FUNC(log);
+VML_FUNC(exp2);
+VML_FUNC(log2);
+VML_FUNC(sqrt);
+VML_FUNC(rsqrt);
+VML_FUNC(abs);
+VML_FUNC(sign);
+VML_FUNC(floor);
+VML_FUNC(trunc);
+VML_FUNC(ceil);
+VML_FUNC(fract);
+VML_FUNC(mod);
+VML_FUNC(min);
+VML_FUNC(max);
+VML_FUNC(clamp);
+VML_FUNC(mix);
+VML_FUNC(step);
+VML_FUNC(smoothstep);
+VML_FUNC(length);
+VML_FUNC(distance);
+VML_FUNC(normalize);
+VML_FUNC(dot);
+VML_FUNC(cross);
+VML_FUNC(faceforward);
+VML_FUNC(reflect);
+VML_FUNC(refract);
 
 VML_FUNC(fmt);
 
+template <typename T>
+inline constexpr matrix<T, 4, 4> look_at(const vector<T, 3> &eye,
+                                         const vector<T, 3> &center,
+                                         const vector<T, 3> &up) {
+  const vector<T, 3> f(normalize(center - eye));
+  const vector<T, 3> s(normalize(cross(up, f)));
+  const vector<T, 3> u(cross(f, s));
+
+  matrix<T, 4, 4> result(1);
+  result[0][0] = s.x;
+  result[0][1] = s.y;
+  result[0][2] = s.z;
+  result[1][0] = u.x;
+  result[1][1] = u.y;
+  result[1][2] = u.z;
+  result[2][0] = f.x;
+  result[2][1] = f.y;
+  result[2][2] = f.z;
+  result[0][3] = -dot(s, eye);
+  result[1][3] = -dot(u, eye);
+  result[1][3] = -dot(f, eye);
+  return result;
+}
+
+template <typename T> using tmat4 = ::vml::matrix<T, 4, 4>;
+template <typename T> using tmat3 = ::vml::matrix<T, 3, 3>;
+template <typename T> using tmat2 = ::vml::matrix<T, 2, 2>;
 template <typename T> using tvec4 = ::vml::vector<T, 4>;
 template <typename T> using tvec3 = ::vml::vector<T, 3>;
 template <typename T> using tvec2 = ::vml::vector<T, 2>;
+
+typedef tmat4<float> fmat4;
+typedef tmat3<float> fmat3;
+typedef tmat2<float> fmat2;
+typedef tmat4<bool> bmat4;
+typedef tmat3<bool> bmat3;
+typedef tmat2<bool> bmat2;
+typedef tmat4<double> dmat4;
+typedef tmat3<double> dmat3;
+typedef tmat2<double> dmat2;
+typedef tmat4<int> imat4;
+typedef tmat3<int> imat3;
+typedef tmat2<int> imat2;
+typedef tmat4<unsigned> umat4;
+typedef tmat3<unsigned> umat3;
+typedef tmat2<unsigned> umat2;
 
 typedef tvec4<float> fvec4;
 typedef tvec3<float> fvec3;
@@ -893,6 +1322,13 @@ typedef tvec2<int> ivec2;
 typedef tvec4<unsigned> uvec4;
 typedef tvec3<unsigned> uvec3;
 typedef tvec2<unsigned> uvec2;
+
+typedef fmat4 mat4;
+typedef fmat3 mat3;
+typedef fmat2 mat2;
+typedef fvec4 vec4;
+typedef fvec3 vec3;
+typedef fvec2 vec2;
 
 } // namespace vml
 

@@ -101,7 +101,8 @@ endmacro()
 # EXECUTABLE
 # ##############################################################################
 set(SOURCES
-    src/main.cpp)
+    src/main.cpp
+    src/prof.cpp)
 add_executable(urm ${SOURCES})
 set_target_properties(
   urm PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS OFF)
